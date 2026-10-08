@@ -102,7 +102,9 @@ class Processor:
                     self._save_usage(call, usage)
                     return self._skip(s, call, f"Нецелевой звонок: {cls.reason}")
 
-            evaluation = self.evaluator.evaluate(transcript, call.call_type, call.direction, call.started_at, usage)
+            evaluation = self.evaluator.evaluate(
+                transcript, call.call_type, call.direction, call.started_at, usage, model=call.llm_model_override
+            )
             self._save_evaluation(call, evaluation)
             self._save_usage(call, usage)
             call.status = db.DONE

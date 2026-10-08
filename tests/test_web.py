@@ -203,3 +203,23 @@ def test_match_employee(settings):
         assert match_employee(s, clinic, "Мария") is None  # две Марии — не угадываем
         assert match_employee(s, clinic, "Ольга") is None
         assert match_employee(s, clinic, None) is None
+
+
+def test_models_split_and_precise_reevaluate(settings):
+    settings.llm_model = "eval-model"
+    settings.llm_classify_model = "cheap-model"
+    settings.llm_precise_model = "precise-model"
+    app, client, _, llm = make(settings)
+    client.post("/calls/upload", files=[("files", ("c.txt", sample_text().encode(), "text/plain"))])
+    process_all(app)
+    assert llm.models == ["cheap-model", "eval-model"]
+    assert "Переоценить точной моделью" in client.get("/calls/1").text
+
+    client.post("/calls/1/reevaluate-precise")
+    call = get_call(app)
+    assert call.status == db.QUEUED and call.llm_model_override == "precise-model"
+    process_all(app)
+    assert llm.models[-1] == "precise-model"
+
+    client.post("/calls/1/reevaluate")  # обычная переоценка снова основной моделью
+    assert get_call(app).llm_model_override is None

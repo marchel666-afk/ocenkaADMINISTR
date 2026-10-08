@@ -31,7 +31,9 @@ class LLMResponse:
 
 
 class LLMClient(Protocol):
-    def complete(self, system_parts: list[str], user: str, max_tokens: int | None = None) -> LLMResponse: ...
+    def complete(
+        self, system_parts: list[str], user: str, max_tokens: int | None = None, model: str | None = None
+    ) -> LLMResponse: ...
 
 
 class OpenRouterClient:
@@ -39,13 +41,13 @@ class OpenRouterClient:
         self.settings = settings
         self.http = http or httpx.Client(timeout=settings.llm_timeout_sec)
 
-    def _body(self, system_parts: list[str], user: str, max_tokens: int | None) -> dict:
+    def _body(self, system_parts: list[str], user: str, max_tokens: int | None, model: str | None = None) -> dict:
         system_content = [{"type": "text", "text": part} for part in system_parts]
         if self.settings.llm_prompt_cache and system_content:
             # Неизменная часть запроса (правила + чек-лист) кешируется у провайдера — повторные звонки дешевле.
             system_content[-1]["cache_control"] = {"type": "ephemeral"}
         body: dict = {
-            "model": self.settings.llm_model,
+            "model": model or self.settings.llm_model,
             "messages": [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": user},
@@ -57,7 +59,9 @@ class OpenRouterClient:
             body["reasoning"] = {"effort": self.settings.llm_reasoning_effort}
         return body
 
-    def complete(self, system_parts: list[str], user: str, max_tokens: int | None = None) -> LLMResponse:
+    def complete(
+        self, system_parts: list[str], user: str, max_tokens: int | None = None, model: str | None = None
+    ) -> LLMResponse:
         if not self.settings.openrouter_api_key:
             raise LLMError("Не задан OPENROUTER_API_KEY в файле .env")
 
@@ -67,7 +71,7 @@ class OpenRouterClient:
             "Content-Type": "application/json",
             "X-Title": "Call quality control",
         }
-        body = self._body(system_parts, user, max_tokens)
+        body = self._body(system_parts, user, max_tokens, model)
 
         last_error = ""
         for attempt in range(len(_RETRY_DELAYS) + 1):

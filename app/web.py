@@ -130,7 +130,9 @@ def create_app(
     checklists = load_checklists(settings.checklists_path)
     session_factory = db.make_session_factory(settings.db_url)
     clinic_id = db.ensure_default_clinic(session_factory, settings.clinic_name)
-    evaluator = Evaluator(checklists, llm or OpenRouterClient(settings))
+    evaluator = Evaluator(
+        checklists, llm or OpenRouterClient(settings), settings.llm_classify_model, settings.llm_model
+    )
     processor = Processor(
         settings, session_factory, checklists, transcriber or SherpaTranscriber(settings), evaluator
     )
@@ -330,6 +332,7 @@ def create_app(
                 scenarios=checklists.scenarios,
                 employees=employees(s, active_only=True),
                 NOT_TARGET=NOT_TARGET,
+                precise_model=settings.llm_precise_model if settings.llm_precise_model != settings.llm_model else "",
             )
 
     @app.get("/calls/{call_id}/audio")
@@ -343,7 +346,8 @@ def create_app(
                 raise HTTPException(status_code=404, detail="Файл записи не найден")
             return FileResponse(path, filename=call.original_filename or path.name)
 
-    def requeue(s, call: db.Call, retranscribe: bool = False) -> None:
+    def requeue(s, call: db.Call, retranscribe: bool = False, model: str | None = None) -> None:
+        call.llm_model_override = model
         if retranscribe and call.audio_path:
             call.transcript_json = None
         if not call.call_type_manual:
@@ -385,6 +389,13 @@ def create_app(
     def call_reevaluate(call_id: int):
         with session_factory() as s:
             requeue(s, load_call(s, call_id))
+        wake_worker()
+        return RedirectResponse(f"/calls/{call_id}", status_code=303)
+
+    @app.post("/calls/{call_id}/reevaluate-precise")
+    def call_reevaluate_precise(call_id: int):
+        with session_factory() as s:
+            requeue(s, load_call(s, call_id), model=settings.llm_precise_model or None)
         wake_worker()
         return RedirectResponse(f"/calls/{call_id}", status_code=303)
 

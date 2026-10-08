@@ -37,7 +37,9 @@ class Settings:
     # OpenRouter
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    llm_model: str = "anthropic/claude-haiku-5.5"
+    llm_model: str = "anthropic/claude-haiku-5.5"  # оценка звонков
+    llm_classify_model: str = "anthropic/claude-haiku-5.5"  # определение типа звонка
+    llm_precise_model: str = "anthropic/claude-sonnet-5.5"  # кнопка «Переоценить точной моделью»
     llm_reasoning_effort: str = ""  # пусто — не передавать; иначе low / medium / high
     llm_max_tokens: int = 12000
     llm_prompt_cache: bool = True
@@ -82,6 +84,8 @@ class Settings:
         s.openrouter_api_key = e("OPENROUTER_API_KEY", s.openrouter_api_key)
         s.openrouter_base_url = e("OPENROUTER_BASE_URL", s.openrouter_base_url).rstrip("/")
         s.llm_model = e("LLM_MODEL", s.llm_model)
+        s.llm_classify_model = e("LLM_CLASSIFY_MODEL", s.llm_classify_model)
+        s.llm_precise_model = e("LLM_PRECISE_MODEL", s.llm_precise_model)
         s.llm_reasoning_effort = e("LLM_REASONING_EFFORT", s.llm_reasoning_effort).strip().lower()
         s.llm_max_tokens = _int(e("LLM_MAX_TOKENS"), s.llm_max_tokens)
         s.llm_prompt_cache = _bool(e("LLM_PROMPT_CACHE"), s.llm_prompt_cache)

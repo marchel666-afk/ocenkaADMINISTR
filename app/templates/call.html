@@ -153,6 +153,9 @@
   </form>
   <div class="btn-row">
     <form method="post" action="/calls/{{ call.id }}/reevaluate"><button class="btn" type="submit">Переоценить</button></form>
+    {% if precise_model %}
+    <form method="post" action="/calls/{{ call.id }}/reevaluate-precise" title="{{ precise_model }} — точнее, но дороже (несколько рублей за звонок)"><button class="btn" type="submit">Переоценить точной моделью</button></form>
+    {% endif %}
     {% if call.audio_path %}
     <form method="post" action="/calls/{{ call.id }}/retranscribe"><button class="btn" type="submit">Расшифровать заново</button></form>
     {% endif %}

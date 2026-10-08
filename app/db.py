@@ -99,6 +99,7 @@ class Call(Base):
     score_scenario: Mapped[float | None] = mapped_column(Float, default=None)
 
     llm_model: Mapped[str] = mapped_column(String(200), default="")
+    llm_model_override: Mapped[str | None] = mapped_column(String(200), default=None)  # оценка другой моделью
     llm_tokens: Mapped[int] = mapped_column(Integer, default=0)
     llm_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
 

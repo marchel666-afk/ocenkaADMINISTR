@@ -88,3 +88,14 @@ def test_missing_key(settings):
     settings.openrouter_api_key = ""
     with pytest.raises(LLMError, match="OPENROUTER_API_KEY"):
         make_client(settings, lambda r: ok_response()).complete(["a"], "b")
+
+
+def test_model_override(settings):
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return ok_response()
+
+    make_client(settings, handler).complete(["a"], "b", model="anthropic/claude-sonnet-5.5")
+    assert seen["body"]["model"] == "anthropic/claude-sonnet-5.5"
