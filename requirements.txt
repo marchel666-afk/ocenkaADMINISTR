@@ -7,6 +7,6 @@ httpx>=0.27
 pyyaml>=6.0
 python-dotenv>=1.0
 openpyxl>=3.1
-faster-whisper>=1.1
+sherpa-onnx>=1.13
 av>=12
 numpy>=1.24

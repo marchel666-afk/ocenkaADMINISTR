@@ -43,16 +43,14 @@ class Settings:
     llm_prompt_cache: bool = True
     llm_timeout_sec: int = 240
 
-    # Расшифровка (faster-whisper)
-    whisper_model: str = "large-v3-turbo"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
-    whisper_threads: int = 0  # 0 — автоматически
-    whisper_initial_prompt: str = (
-        "Клиника лазерной хирургии «Варикоза нет», администратор. "
-        "Флеболог, УЗИ вен нижних конечностей, варикоз, склеротерапия, КЛАКС, СНИЛС."
-    )
+    # Расшифровка (sherpa-onnx: GigaAM v2 + Silero VAD + TitaNet)
+    asr_threads: int = 0  # 0 — автоматически (до 4 ядер)
+    models_base_url: str = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
+    diarization: bool = True  # разделять собеседников по голосу в моно-записях
     stereo_admin_channel: str = "auto"  # auto / left / right
+
+    # Записи Mango: сдвиг времени из имени файла до местного времени клиники, часов
+    mango_time_shift_hours: int = 0
 
     # Обработка
     min_call_seconds: int = 20
@@ -89,12 +87,11 @@ class Settings:
         s.llm_prompt_cache = _bool(e("LLM_PROMPT_CACHE"), s.llm_prompt_cache)
         s.llm_timeout_sec = _int(e("LLM_TIMEOUT_SEC"), s.llm_timeout_sec)
 
-        s.whisper_model = e("WHISPER_MODEL", s.whisper_model)
-        s.whisper_device = e("WHISPER_DEVICE", s.whisper_device)
-        s.whisper_compute_type = e("WHISPER_COMPUTE_TYPE", s.whisper_compute_type)
-        s.whisper_threads = _int(e("WHISPER_THREADS"), s.whisper_threads)
-        s.whisper_initial_prompt = e("WHISPER_INITIAL_PROMPT", s.whisper_initial_prompt)
+        s.asr_threads = _int(e("ASR_THREADS"), s.asr_threads)
+        s.models_base_url = e("MODELS_BASE_URL", s.models_base_url)
+        s.diarization = _bool(e("DIARIZATION"), s.diarization)
         s.stereo_admin_channel = e("STEREO_ADMIN_CHANNEL", s.stereo_admin_channel).strip().lower()
+        s.mango_time_shift_hours = _int(e("MANGO_TIME_SHIFT_HOURS"), s.mango_time_shift_hours)
 
         s.min_call_seconds = _int(e("MIN_CALL_SECONDS"), s.min_call_seconds)
         s.worker_enabled = _bool(e("WORKER_ENABLED"), s.worker_enabled)

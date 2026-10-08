@@ -14,7 +14,7 @@ from .checklists import GENERAL_KEY, NOT_TARGET, ChecklistSet
 from .config import Settings
 from .evaluation import Evaluation, Evaluator, Usage
 from .scoring import weighted_score
-from .transcription import Transcriber, Transcript
+from .transcription import Transcriber, Transcript, apply_admin_speaker
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +92,8 @@ class Processor:
                 cls = self.evaluator.classify(transcript, call.direction, call.started_at, usage)
                 call.call_type = cls.call_type
                 call.classification_reason = cls.reason
+                if apply_admin_speaker(transcript, cls.admin_speaker):
+                    call.transcript_json = transcript.to_json()
                 if call.employee_id is None:
                     employee = match_employee(s, call.clinic_id, cls.admin_name)
                     if employee is not None:

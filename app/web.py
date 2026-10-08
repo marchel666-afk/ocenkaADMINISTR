@@ -23,10 +23,11 @@ from .checklists import GENERAL_KEY, NOT_TARGET, load_checklists
 from .config import Settings
 from .evaluation import Evaluation, Evaluator
 from .llm import LLMClient, OpenRouterClient
+from .mango import parse_mango_filename
 from .pipeline import Processor, Worker, requeue_interrupted
 from .reports import build_excel, criterion_stats, employee_stats, period_start
 from .scoring import RESULT_LABELS
-from .transcription import SPEAKER_LABELS, Transcriber, Transcript, WhisperTranscriber, transcript_from_text
+from .transcription import SPEAKER_LABELS, SherpaTranscriber, Transcriber, Transcript, transcript_from_text
 
 log = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ def create_app(
     clinic_id = db.ensure_default_clinic(session_factory, settings.clinic_name)
     evaluator = Evaluator(checklists, llm or OpenRouterClient(settings))
     processor = Processor(
-        settings, session_factory, checklists, transcriber or WhisperTranscriber(settings), evaluator
+        settings, session_factory, checklists, transcriber or SherpaTranscriber(settings), evaluator
     )
     worker = Worker(processor, settings.worker_poll_sec) if settings.worker_enabled else None
 
@@ -265,14 +266,17 @@ def create_app(
                     continue
                 name = Path(upload_file.filename).name
                 ext = Path(name).suffix.lower()
+                mango = parse_mango_filename(name, settings.mango_time_shift_hours)
                 call = db.Call(
                     clinic_id=clinic_id,
                     employee_id=emp_id,
                     original_filename=name,
-                    direction=direction or None,
+                    direction=direction or (mango.direction if mango else None),
                     call_type=call_type or None,
                     call_type_manual=bool(call_type),
-                    started_at=manual_dt or guess_datetime(name),
+                    started_at=manual_dt or (mango.started_at if mango else guess_datetime(name)),
+                    phone=mango.phone if mango else None,
+                    mango_line=mango.line if mango else None,
                     status=db.QUEUED,
                 )
                 if ext in TEXT_EXTENSIONS:

@@ -12,6 +12,7 @@
       <dt>Администратор</dt><dd>{{ call.employee.name if call.employee else 'не указан' }}</dd>
       <dt>Тип звонка</dt><dd>{{ scenario_title(call.call_type) if call.call_type else '—' }}{% if call.call_type and not call.call_type_manual %} <span class="muted">(определён автоматически)</span>{% endif %}</dd>
       <dt>Направление</dt><dd>{{ DIRECTIONS.get(call.direction, '—') }}</dd>
+      {% if call.phone %}<dt>Телефон</dt><dd>{{ call.phone }}{% if call.mango_line %} <span class="muted">· линия {{ call.mango_line }}</span>{% endif %}</dd>{% endif %}
       <dt>Длительность</dt><dd>{{ call.duration_sec|duration }}</dd>
       <dt>Файл</dt><dd>{{ call.original_filename or '—' }}</dd>
       <dt>Статус</dt><dd><span class="status status-{{ call.status }}">{{ STATUS_LABELS[call.status] }}</span></dd>

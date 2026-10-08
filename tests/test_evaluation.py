@@ -76,6 +76,12 @@ def test_classify(checklists):
     assert "out_reminder" in system and "incoming:" not in system  # для исходящих — только исходящие сценарии
 
 
+def test_classify_admin_speaker(checklists):
+    llm = FakeLLM(raw=['{"call_type": "incoming", "admin_name": "Анна", "admin_speaker": 2, "reason": "т"}'])
+    cls = Evaluator(checklists, llm).classify(sample_transcript(), "in", None, Usage())
+    assert cls.admin_speaker == "s2"
+
+
 def test_classify_rejects_unknown(checklists):
     llm = FakeLLM(call_type="incoming")
     with pytest.raises(LLMError):

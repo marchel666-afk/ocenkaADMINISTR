@@ -15,7 +15,9 @@ from sqlalchemy import (
     Text,
     create_engine,
     event,
+    inspect,
     select,
+    text,
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
@@ -79,6 +81,8 @@ class Call(Base):
     original_filename: Mapped[str] = mapped_column(String(500), default="")
     audio_path: Mapped[str | None] = mapped_column(String(500), default=None)  # относительно data/audio
     direction: Mapped[str | None] = mapped_column(String(10), default=None)  # in / out
+    phone: Mapped[str | None] = mapped_column(String(30), default=None)  # номер собеседника (из Mango)
+    mango_line: Mapped[str | None] = mapped_column(String(200), default=None)  # линия/сотрудник в Mango
     call_type: Mapped[str | None] = mapped_column(String(50), default=None)
     call_type_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     classification_reason: Mapped[str] = mapped_column(Text, default="")
@@ -137,10 +141,25 @@ def _sqlite_pragmas(dbapi_connection, _record):
         cur.close()
 
 
+def _add_missing_columns(engine) -> None:
+    """Простая миграция: добавляет в существующие таблицы колонки, появившиеся в новых версиях."""
+    insp = inspect(engine)
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            existing = {c["name"] for c in insp.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in existing:
+                    col_type = column.type.compile(dialect=engine.dialect)
+                    conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {col_type}'))
+
+
 def make_session_factory(db_url: str) -> sessionmaker:
     connect_args = {"check_same_thread": False, "timeout": 30} if db_url.startswith("sqlite") else {}
     engine = create_engine(db_url, connect_args=connect_args)
     Base.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return sessionmaker(engine, expire_on_commit=False)
 
 

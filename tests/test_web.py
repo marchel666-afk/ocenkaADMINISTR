@@ -146,6 +146,43 @@ def test_password(settings):
     assert client.get("/calls", auth=("admin", "secret")).status_code == 200
 
 
+def test_mango_filename():
+    from app.mango import parse_mango_filename
+
+    inc = parse_mango_filename("2026-10-07__12-19-24__79084642037__Регистратура_1.mp3", shift_hours=7)
+    assert inc.direction == "in" and inc.phone == "79084642037" and inc.line == "Регистратура_1"
+    assert inc.started_at.isoformat() == "2026-10-07T19:19:24"
+    out = parse_mango_filename("504b15a8-2026-10-06__09-08-05__Регистратура_1__79147160849.mp3")
+    assert out.direction == "out" and out.phone == "79147160849" and out.line == "Регистратура_1"
+    assert out.started_at.isoformat() == "2026-10-06T09:08:05"
+    assert parse_mango_filename("2026-10-07__12-19-24__что-то.mp3").direction is None
+    assert parse_mango_filename("zapis.mp3") is None
+
+
+def test_upload_mango_file(settings):
+    settings.mango_time_shift_hours = 7
+    app, client, _, _ = make(settings)
+    client.post("/calls/upload", files=[("files", ("2026-10-07__12-19-24__79084642037__Регистратура_1.mp3", b"x", "audio/mpeg"))])
+    call = get_call(app)
+    assert call.direction == "in" and call.phone == "79084642037" and call.mango_line == "Регистратура_1"
+    assert call.started_at.isoformat() == "2026-10-07T19:19:24"
+
+
+def test_db_migration_adds_columns(settings):
+    import sqlite3
+
+    path = settings.data_dir / "ocenka.db"
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE calls (id INTEGER PRIMARY KEY, clinic_id INTEGER)")
+    con.commit()
+    con.close()
+    make(settings)  # создание приложения должно добавить недостающие колонки
+    con = sqlite3.connect(path)
+    cols = {row[1] for row in con.execute("PRAGMA table_info(calls)")}
+    con.close()
+    assert {"phone", "mango_line", "status", "score_total"} <= cols
+
+
 def test_guess_datetime():
     assert guess_datetime("2026-10-08_14-32-05.mp3").isoformat() == "2026-10-08T14:32:05"
     assert guess_datetime("rec 20261008 1432.mp3").isoformat() == "2026-10-08T14:32:00"
