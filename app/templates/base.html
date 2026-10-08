@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Оценка звонков{% endblock %} — {{ clinic_name }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="/calls">Оценка звонков <span>{{ clinic_name }}</span></a>
+      <nav>
+        <a href="/calls">Звонки</a>
+        <a href="/stats">Сводка</a>
+        <a href="/employees">Сотрудники</a>
+      </nav>
+    </div>
+  </header>
+  <main class="wrap">
+    {% if api_key_missing %}
+    <div class="alert alert-warn">
+      Не задан ключ OpenRouter (<code>OPENROUTER_API_KEY</code> в файле <code>.env</code>) — звонки будут расшифровываться, но не оцениваться.
+    </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

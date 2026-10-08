@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Сотрудники{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Сотрудники</h2>
+  <p class="muted small">Если при загрузке администратор не выбран, сервис ищет его здесь по имени, которым он представился в разговоре.</p>
+  <form class="inline-form" method="post" action="/employees">
+    <input type="text" name="name" placeholder="Имя Фамилия" required>
+    <button class="btn btn-primary" type="submit">Добавить</button>
+  </form>
+  {% if employees %}
+  <table class="table">
+    <thead><tr><th>Имя</th><th>Звонков</th><th>Статус</th><th></th></tr></thead>
+    <tbody>
+    {% for e in employees %}
+      <tr class="{% if not e.active %}row-skip{% endif %}">
+        <td>
+          <form class="inline-form" method="post" action="/employees/{{ e.id }}/rename">
+            <input type="text" name="name" value="{{ e.name }}">
+            <button class="btn btn-small" type="submit">Сохранить</button>
+          </form>
+        </td>
+        <td><a href="/calls?employee={{ e.id }}&days=0">{{ counts.get(e.id, 0) }}</a></td>
+        <td>{{ 'работает' if e.active else 'не работает' }}</td>
+        <td>
+          <form method="post" action="/employees/{{ e.id }}/toggle">
+            <button class="btn btn-small" type="submit">{{ 'Отключить' if e.active else 'Вернуть' }}</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Сводка{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="card-head">
+    <h2>Сводка по администраторам</h2>
+    <form class="filters" method="get" action="/stats">
+      <select name="days" onchange="this.form.submit()">
+        {% for d, label in PERIODS.items() %}<option value="{{ d }}" {% if f_days == d %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <input type="hidden" name="employee" value="{{ f_employee }}">
+      <a class="btn" href="/export.xlsx?days={{ f_days }}">Выгрузить в Excel</a>
+    </form>
+  </div>
+  {% if rows %}
+  <table class="table">
+    <thead><tr><th>Администратор</th><th>Оценено звонков</th><th>Итог</th><th>Общие правила</th><th>Сценарий</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{% if r.employee_id %}<a href="/calls?employee={{ r.employee_id }}&days={{ f_days }}">{{ r.name }}</a>{% else %}{{ r.name }}{% endif %}</td>
+        <td>{{ r.calls }}</td>
+        <td><span class="score {{ r.avg_total|score_class }}">{{ r.avg_total|score }}</span></td>
+        <td>{{ r.avg_general|score }}</td>
+        <td>{{ r.avg_scenario|score }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Оценённых звонков за период нет.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>Частые ошибки</h2>
+    <form class="filters" method="get" action="/stats">
+      <input type="hidden" name="days" value="{{ f_days }}">
+      <select name="employee" onchange="this.form.submit()">
+        <option value="">Все сотрудники</option>
+        {% for e in employees %}<option value="{{ e.id }}" {% if f_employee == e.id|string %}selected{% endif %}>{{ e.name }}</option>{% endfor %}
+      </select>
+    </form>
+  </div>
+  {% if criteria %}
+  <table class="table">
+    <thead><tr><th>Чек-лист</th><th>№</th><th>Пункт</th><th>Не выполнен</th><th>Доля</th></tr></thead>
+    <tbody>
+    {% for c in criteria %}
+      <tr>
+        <td class="small">{{ c.checklist_title }}</td>
+        <td>{{ c.num }}</td>
+        <td>{{ c.text }}</td>
+        <td>{{ c.failed }} из {{ c.applicable }}</td>
+        <td><span class="score {{ (100 - c.fail_rate)|score_class }}">{{ c.fail_rate|score }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Ошибок за период не найдено.</p>
+  {% endif %}
+</section>
+{% endblock %}

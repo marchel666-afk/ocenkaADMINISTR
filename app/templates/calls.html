@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Звонки{% endblock %}
+{% block head %}{% if pending %}<meta http-equiv="refresh" content="15">{% endif %}{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Загрузить звонки</h2>
+  <form class="upload" action="/calls/upload" method="post" enctype="multipart/form-data">
+    <label class="field wide">
+      <span>Записи (mp3, wav, ogg…) или готовые расшифровки (.txt) — можно несколько файлов</span>
+      <input type="file" name="files" multiple required accept="audio/*,.mp3,.wav,.ogg,.m4a,.amr,.txt">
+    </label>
+    <label class="field">
+      <span>Администратор</span>
+      <select name="employee_id">
+        <option value="">— определить по разговору —</option>
+        {% for e in active_employees %}<option value="{{ e.id }}">{{ e.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>или новый сотрудник</span>
+      <input type="text" name="new_employee" placeholder="Имя Фамилия">
+    </label>
+    <label class="field">
+      <span>Тип звонка</span>
+      <select name="call_type">
+        <option value="">— определить автоматически —</option>
+        {% for key, sc in scenarios.items() %}<option value="{{ key }}">{{ sc.title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Направление (если тип не указан)</span>
+      <select name="direction">
+        <option value="">— не знаю —</option>
+        {% for key, label in DIRECTIONS.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Дата и время звонка</span>
+      <input type="datetime-local" name="started_at">
+    </label>
+    <div class="field actions"><button type="submit" class="btn btn-primary">Загрузить и оценить</button></div>
+  </form>
+  <p class="muted small">Если дата не указана, она берётся из имени файла (например, <code>2026-10-08_14-32.mp3</code>), иначе — время загрузки.</p>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>Звонки <span class="muted">({{ total }})</span></h2>
+    <form class="filters" method="get" action="/calls">
+      <select name="employee" onchange="this.form.submit()">
+        <option value="">Все сотрудники</option>
+        <option value="none" {% if f_employee == 'none' %}selected{% endif %}>Не указан</option>
+        {% for e in employees %}<option value="{{ e.id }}" {% if f_employee == e.id|string %}selected{% endif %}>{{ e.name }}</option>{% endfor %}
+      </select>
+      <select name="status" onchange="this.form.submit()">
+        <option value="">Все статусы</option>
+        {% for key, label in STATUS_LABELS.items() %}<option value="{{ key }}" {% if f_status == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <select name="days" onchange="this.form.submit()">
+        {% for d, label in PERIODS.items() %}<option value="{{ d }}" {% if f_days == d %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <a class="btn" href="/export.xlsx?days={{ f_days }}">Выгрузить в Excel</a>
+    </form>
+  </div>
+  {% if pending %}<p class="muted small">В обработке: {{ pending }}. Страница обновляется автоматически.</p>{% endif %}
+  {% if calls %}
+  <table class="table">
+    <thead><tr><th>Дата</th><th>Администратор</th><th>Тип звонка</th><th>Длит.</th><th>Оценка</th><th>Статус</th></tr></thead>
+    <tbody>
+    {% for c in calls %}
+      <tr class="clickable" onclick="location.href='/calls/{{ c.id }}'">
+        <td><a href="/calls/{{ c.id }}">{{ c.when|dt }}</a></td>
+        <td>{{ c.employee.name if c.employee else '—' }}</td>
+        <td>{{ scenario_title(c.call_type) if c.call_type else '—' }}</td>
+        <td>{{ c.duration_sec|duration }}</td>
+        <td><span class="score {{ c.score_total|score_class }}">{{ c.score_total|score }}</span></td>
+        <td><span class="status status-{{ c.status }}">{{ STATUS_LABELS[c.status] }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if pages > 1 %}
+  <div class="pager">
+    {% for p in range(1, pages + 1) %}
+      <a class="{% if p == page %}active{% endif %}" href="/calls?employee={{ f_employee }}&status={{ f_status }}&days={{ f_days }}&page={{ p }}">{{ p }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="muted">Звонков за выбранный период нет.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Звонок №{{ call.id }}{% endblock %}
+{% block head %}{% if call.status in ('queued', 'transcribing', 'evaluating') %}<meta http-equiv="refresh" content="10">{% endif %}{% endblock %}
+{% block content %}
+<p><a href="/calls">← ко всем звонкам</a></p>
+
+<section class="card call-head">
+  <div class="call-meta">
+    <h2>Звонок №{{ call.id }}</h2>
+    <dl>
+      <dt>Дата</dt><dd>{{ call.when|dt }}{% if not call.started_at %} <span class="muted">(время загрузки)</span>{% endif %}</dd>
+      <dt>Администратор</dt><dd>{{ call.employee.name if call.employee else 'не указан' }}</dd>
+      <dt>Тип звонка</dt><dd>{{ scenario_title(call.call_type) if call.call_type else '—' }}{% if call.call_type and not call.call_type_manual %} <span class="muted">(определён автоматически)</span>{% endif %}</dd>
+      <dt>Направление</dt><dd>{{ DIRECTIONS.get(call.direction, '—') }}</dd>
+      <dt>Длительность</dt><dd>{{ call.duration_sec|duration }}</dd>
+      <dt>Файл</dt><dd>{{ call.original_filename or '—' }}</dd>
+      <dt>Статус</dt><dd><span class="status status-{{ call.status }}">{{ STATUS_LABELS[call.status] }}</span></dd>
+    </dl>
+    {% if call.status_message %}
+      <div class="alert {% if call.status == 'error' %}alert-error{% else %}alert-info{% endif %}">{{ call.status_message }}</div>
+    {% endif %}
+    {% if call.classification_reason and call.call_type and not call.call_type_manual %}
+      <p class="muted small">Почему такой тип: {{ call.classification_reason }}</p>
+    {% endif %}
+  </div>
+  {% if call.status == 'done' %}
+  <div class="scores">
+    <div class="score-big {{ call.score_total|score_class }}">{{ call.score_total|score }}<span>итог</span></div>
+    <div class="score-small"><span class="score {{ call.score_general|score_class }}">{{ call.score_general|score }}</span> общие правила</div>
+    <div class="score-small"><span class="score {{ call.score_scenario|score_class }}">{{ call.score_scenario|score }}</span> сценарий</div>
+  </div>
+  {% endif %}
+</section>
+
+{% if call.audio_path %}
+<section class="card">
+  <audio controls preload="none" src="/calls/{{ call.id }}/audio" style="width:100%"></audio>
+</section>
+{% endif %}
+
+{% if evaluation %}
+<section class="card feedback">
+  <h2>Обратная связь администратору</h2>
+  {% if evaluation.summary %}<p class="summary">{{ evaluation.summary }}</p>{% endif %}
+  <div class="grid-2">
+    <div>
+      <h3>Что получилось хорошо</h3>
+      <ul class="good">{% for s in evaluation.strengths %}<li>{{ s }}</li>{% endfor %}</ul>
+    </div>
+    <div>
+      <h3>Что улучшить</h3>
+      <ol class="improve">
+        {% for i in evaluation.improvements %}
+        <li>
+          {% if i.criterion_id %}<span class="tag">{{ i.criterion_id }}</span>{% endif %}
+          <b>{{ i.issue }}</b>
+          {% if i.recommendation %}<div>{{ i.recommendation }}</div>{% endif %}
+          {% if i.example %}<div class="example">Как сказать: «{{ i.example | replace('«', '') | replace('»', '') }}»</div>{% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+    </div>
+  </div>
+</section>
+
+{% if sections %}
+<section class="card card-head">
+  <span>Не выполнено пунктов: <b>{{ call.results | selectattr('result', 'equalto', 'no') | list | length }}</b>
+    из {{ call.results | rejectattr('result', 'equalto', 'na') | list | length }} применимых</span>
+  <label class="toggle"><input type="checkbox" id="only-failed"> показывать только невыполненные</label>
+</section>
+{% endif %}
+
+{% for sec in sections %}
+<section class="card">
+  <div class="card-head">
+    <h2>{{ sec.title }}</h2>
+    <span class="score {{ sec.score|score_class }}">{{ sec.score|score }}</span>
+  </div>
+  <table class="table criteria">
+    <thead><tr><th>№</th><th>Пункт</th><th>Значимость</th><th>Оценка</th><th>Обоснование</th></tr></thead>
+    <tbody>
+    {% for c in sec.criteria %}
+      {% set v = evaluation.verdicts.get(c.id) %}
+      {% if not c.evaluable %}
+      <tr class="row-skip">
+        <td>{{ c.num }}</td><td>{{ c.text }}</td><td>{{ weight_labels.get(c.weight_key, '') }}</td>
+        <td colspan="2" class="muted">не оценивается по записи</td>
+      </tr>
+      {% else %}
+      <tr class="row-{{ v.result if v else 'na' }}">
+        <td>{{ c.num }}</td>
+        <td>{{ c.text }}</td>
+        <td>{{ weight_labels.get(c.weight_key, '') }}</td>
+        <td><span class="verdict verdict-{{ v.result if v else 'na' }}">{{ RESULT_LABELS[v.result] if v else '—' }}</span></td>
+        <td>
+          {% if v and v.evidence %}<div class="quote">«{{ v.evidence }}»</div>{% endif %}
+          {% if v and v.comment %}<div class="muted small">{{ v.comment }}</div>{% endif %}
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endfor %}
+{% endif %}
+
+{% if transcript %}
+<section class="card">
+  <h2>Расшифровка</h2>
+  {% if not transcript.roles_known %}<p class="muted small">Роли собеседников в записи не размечены (моно-запись) — ИИ определяет их по смыслу.</p>{% endif %}
+  <div class="transcript">
+    {% for seg in transcript.segments %}
+      <p class="seg seg-{{ seg.speaker or 'none' }}">
+        <span class="ts">{{ '%02d:%02d' % ((seg.start|int) // 60, (seg.start|int) % 60) }}</span>
+        {% if seg.speaker %}<b>{{ SPEAKER_LABELS.get(seg.speaker, seg.speaker) }}:</b>{% endif %}
+        {{ seg.text }}
+      </p>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Исправить данные</h2>
+  <form class="upload" method="post" action="/calls/{{ call.id }}/update">
+    <label class="field">
+      <span>Администратор</span>
+      <select name="employee_id">
+        <option value="">— не указан —</option>
+        {% for e in employees %}<option value="{{ e.id }}" {% if call.employee_id == e.id %}selected{% endif %}>{{ e.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>или новый сотрудник</span>
+      <input type="text" name="new_employee" placeholder="Имя Фамилия">
+    </label>
+    <label class="field">
+      <span>Тип звонка</span>
+      <select name="call_type">
+        <option value="auto" {% if not call.call_type_manual %}selected{% endif %}>— определить автоматически —</option>
+        {% for key, sc in scenarios.items() %}<option value="{{ key }}" {% if call.call_type_manual and call.call_type == key %}selected{% endif %}>{{ sc.title }}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Дата и время</span>
+      <input type="datetime-local" name="started_at" value="{{ call.started_at.strftime('%Y-%m-%dT%H:%M') if call.started_at else '' }}">
+    </label>
+    <label class="field check"><input type="checkbox" name="reevaluate" value="1"> переоценить звонок</label>
+    <div class="field actions"><button class="btn btn-primary" type="submit">Сохранить</button></div>
+  </form>
+  <div class="btn-row">
+    <form method="post" action="/calls/{{ call.id }}/reevaluate"><button class="btn" type="submit">Переоценить</button></form>
+    {% if call.audio_path %}
+    <form method="post" action="/calls/{{ call.id }}/retranscribe"><button class="btn" type="submit">Расшифровать заново</button></form>
+    {% endif %}
+    <form method="post" action="/calls/{{ call.id }}/delete" onsubmit="return confirm('Удалить звонок и запись?')"><button class="btn btn-danger" type="submit">Удалить</button></form>
+  </div>
+  {% if call.llm_tokens %}
+  <p class="muted small">Модель: {{ call.llm_model or '—' }} · токенов: {{ call.llm_tokens }} · стоимость: ${{ '%.4f' % call.llm_cost_usd }}</p>
+  {% endif %}
+</section>
+<script>
+  (function () {
+    var box = document.getElementById("only-failed");
+    if (!box) return;
+    var key = "onlyFailed";
+    function apply() { document.body.classList.toggle("only-failed", box.checked); }
+    try { box.checked = localStorage.getItem(key) === "1"; } catch (e) {}
+    apply();
+    box.addEventListener("change", function () {
+      apply();
+      try { localStorage.setItem(key, box.checked ? "1" : "0"); } catch (e) {}
+    });
+  })();
+</script>
+{% endblock %}
