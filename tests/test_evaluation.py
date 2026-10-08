@@ -96,3 +96,31 @@ def test_call_facts_roles_note():
     assert "по голосу" in _call_facts(t, "in", None)
     t.stereo = True
     assert "стерео" in _call_facts(t, "in", None)
+
+
+def test_feedback_consistency_filters():
+    from app.evaluation import Evaluator as E
+
+    data = {
+        "criteria": [
+            {"id": "G01", "result": "yes"},
+            {"id": "G04", "result": "no"},
+            {"id": "IN11", "result": "no"},
+            {"id": "IN22", "result": "na"},
+        ],
+        "summary": "s",
+        "strengths": [
+            {"criterion_id": "G01", "text": "Сами вели разговор"},
+            {"criterion_id": "G04", "text": "Обращались по имени"},  # противоречит «no» — убрать
+            "Вежливость",
+        ],
+        "improvements": [
+            {"criterion_id": "G04", "issue": "по имени", "recommendation": "r", "example": "e"},
+            {"criterion_id": "G01", "issue": "не проблема", "recommendation": "r", "example": "e"},  # «yes» — убрать
+            {"criterion_id": "IN11", "issue": "врач", "recommendation": "r", "example": "e"},
+            {"criterion_id": "IN22", "issue": "na", "recommendation": "r", "example": "e"},  # «na» — убрать
+        ],
+    }
+    ev = E._build("incoming", ["G01", "G04", "IN11", "IN22"], data, {"G01": 3, "G04": 2, "IN11": 3, "IN22": 2})
+    assert ev.strengths == ["Сами вели разговор", "Вежливость"]
+    assert [i.criterion_id for i in ev.improvements] == ["IN11", "G04"]  # по убыванию значимости

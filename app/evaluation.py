@@ -169,13 +169,14 @@ _EVAL_RULES = """Ты — опытный специалист по контро�
 
 Обратная связь администратору — на «вы», доброжелательно и конкретно:
 - summary — 2–3 предложения: общее впечатление от разговора и главный вывод. Опирайся только на факты из расшифровки, порядок событий передавай точно;
-- strengths — 2–4 сильные стороны с опорой на конкретные моменты разговора. Не называй сильной стороной то, за что снижена оценка в чек-листе;
-- improvements — до 3 самых важных зон роста: выбирай из пунктов с оценкой "no", в которых ты уверен, по убыванию значимости; явные пропуски этапов важнее спорных моментов. Для каждой: criterion_id — код пункта, issue — что было не так, recommendation — что делать, example — готовая фраза для ЭТОЙ ситуации: обращайся к реальному собеседнику (если звонящий записывает родственника — к звонящему), используй реальные имена, даты и повод звонка из разговора, а фраза сама должна полностью выполнять требование пункта;
+- strengths — 2–4 сильные стороны с опорой на конкретные моменты разговора. Каждая относится к пункту чек-листа с оценкой "yes": criterion_id — код этого пункта, text — формулировка;
+- improvements — до 3 самых важных зон роста: только из пунктов с оценкой "no", в которых ты уверен, по убыванию значимости; явные пропуски этапов и нарушения высокой значимости важнее формальных мелочей. Для каждой: criterion_id — код пункта, issue — что было не так, recommendation — что делать, example — готовая фраза для ЭТОЙ ситуации: обращайся к реальному собеседнику (если звонящий записывает родственника — к звонящему), используй имена, даты и повод звонка, которые прозвучали в разговоре, а то, чего в разговоре не было (ФИО врача, дату, цену), заменяй заглушкой в квадратных скобках, например [ФИО врача]. Фраза сама должна полностью выполнять требование пункта;
+- обращайся к администратору на «вы» без имени и никогда не называй его именем пациента; учитывай пол собеседников по формам слов в расшифровке;
 - если администратор называл противоречивые цены или условия, не утверждай, какая версия верна, — рекомендуй сверяться с прайсом.
 
 Ответь ТОЛЬКО JSON-объектом без markdown и пояснений, строго такого вида:
 {{"criteria": [{{"id": "G01", "result": "yes", "evidence": "цитата", "comment": "пояснение"}}],
- "summary": "...", "strengths": ["..."],
+ "summary": "...", "strengths": [{{"criterion_id": "G07", "text": "..."}}],
  "improvements": [{{"criterion_id": "IN11", "issue": "...", "recommendation": "...", "example": "..."}}]}}
 В массиве criteria должны быть ВСЕ пункты чек-листа в том же порядке и с теми же кодами.
 
@@ -292,10 +293,11 @@ class Evaluator:
             f"Расшифровка:\n{transcript.to_text()}"
         )
         data = self._ask_json(self.system_parts(call_type), user, usage)
-        return self._build(call_type, expected, data)
+        weights = {c.id: c.weight for c in self.checklists.general.criteria + scenario.criteria}
+        return self._build(call_type, expected, data, weights)
 
     @staticmethod
-    def _build(call_type: str, expected: list[str], data: dict) -> Evaluation:
+    def _build(call_type: str, expected: list[str], data: dict, weights: dict[str, float] | None = None) -> Evaluation:
         warnings: list[str] = []
         raw_items = data.get("criteria") or []
         by_id: dict[str, dict] = {}
@@ -323,18 +325,36 @@ class Evaluator:
         if invalid:
             warnings.append(f"Непонятная оценка по пунктам: {', '.join(invalid)} (учтены как «не применимо»)")
 
+        def verdict_of(criterion_id) -> str | None:
+            v = verdicts.get(str(criterion_id or "").strip().upper())
+            return v.result if v else None
+
+        # Зоны роста — только по невыполненным пунктам, самые значимые первыми.
         improvements = []
         for item in data.get("improvements") or []:
-            if isinstance(item, dict):
+            if isinstance(item, dict) and verdict_of(item.get("criterion_id")) == NO:
                 improvements.append(
                     Improvement(
-                        criterion_id=_clip(item.get("criterion_id"), 20),
+                        criterion_id=str(item.get("criterion_id")).strip().upper(),
                         issue=_clip(item.get("issue"), 500),
                         recommendation=_clip(item.get("recommendation"), 500),
                         example=_clip(item.get("example"), 500),
                     )
                 )
-        strengths = [_clip(s, 400) for s in (data.get("strengths") or []) if str(s).strip()]
+        if weights:
+            improvements.sort(key=lambda i: -weights.get(i.criterion_id, 0))
+
+        # Сильные стороны не должны противоречить оценкам по пунктам.
+        strengths = []
+        for item in data.get("strengths") or []:
+            if isinstance(item, dict):
+                if verdict_of(item.get("criterion_id")) == NO:
+                    continue
+                text = item.get("text")
+            else:
+                text = item
+            if str(text or "").strip():
+                strengths.append(_clip(text, 400))
         return Evaluation(
             call_type=call_type,
             verdicts=verdicts,
