@@ -86,3 +86,13 @@ def test_classify_rejects_unknown(checklists):
     llm = FakeLLM(call_type="incoming")
     with pytest.raises(LLMError):
         Evaluator(checklists, llm).classify(sample_transcript(), "out", None, Usage())
+
+
+def test_call_facts_roles_note():
+    from app.evaluation import _call_facts
+
+    t = sample_transcript()
+    t.stereo = False
+    assert "по голосу" in _call_facts(t, "in", None)
+    t.stereo = True
+    assert "стерео" in _call_facts(t, "in", None)
