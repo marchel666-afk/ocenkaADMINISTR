@@ -10,7 +10,14 @@ import pytest
 from sqlalchemy import select
 
 from app import db
-from app.mango_import import SETTLE_SECONDS, MangoClient, MangoError, MangoScheduler, parse_stats_csv
+from app.mango_import import (
+    SETTLE_SECONDS,
+    MangoClient,
+    MangoError,
+    MangoRecordingError,
+    MangoScheduler,
+    parse_stats_csv,
+)
 
 from .conftest import FakeLLM
 from .test_web import make
@@ -19,17 +26,20 @@ NOW = 1_791_500_000  # фиксированное «сейчас» (unix)
 FIELDS_ROW = "records;start;finish;answer;from_extension;from_number;to_extension;to_number;disconnect_reason;line_number;location;entry_id"
 
 
-def row(records, start, talk, from_ext="", from_num="", to_ext="", to_num="", line="74232000000"):
-    return f"{records};{start};{start + talk + 5};{start + 5};{from_ext};{from_num};{to_ext};{to_num};1110;{line};abonent;e{start}"
+def row(records, start, talk, from_ext="", from_num="", to_ext="", to_num="", line="74232000000", answered=True):
+    answer = start + 5 if answered else 0
+    return f"{records};{start};{start + talk + 5};{answer};{from_ext};{from_num};{to_ext};{to_num};1110;{line};abonent;e{start}"
 
 
 class FakeMango:
     """Поддельный API ВАТС: отвечает на stats/request, stats/result и queries/recording/post."""
 
-    def __init__(self, rows=None, key="KEY", salt="SALT", pending=1):
+    def __init__(self, rows=None, key="KEY", salt="SALT", pending=1, missing=(), busy=0):
         self.rows = rows or []
         self.key, self.salt = key, salt
         self.pending = pending  # сколько раз stats/result отвечает «ещё не готово»
+        self.missing = set(missing)  # записи, которых нет в облачном хранилище
+        self.busy = busy  # сколько первых запросов получат 429 «Rate limit exceeded»
         self.requests = []
         self.downloads = []
 
@@ -43,6 +53,9 @@ class FakeMango:
             return httpx.Response(401, json={"result": 3102})
         payload = json.loads(form["json"])
         self.requests.append((path, payload))
+        if self.busy:
+            self.busy -= 1
+            return httpx.Response(429, json={"name": "Service Unavailable", "message": "Rate limit exceeded.", "code": 0, "status": 429})
         if path.endswith("/stats/request"):
             self.window = (int(payload["date_from"]), int(payload["date_to"]))
             return httpx.Response(200, json={"key": "stat-key"})
@@ -51,9 +64,11 @@ class FakeMango:
                 self.pending -= 1
                 return httpx.Response(204)
             lo, hi = self.window
-            text = "\n".join(r for r in self.rows if lo <= int(r.split(";")[1]) <= hi)
+            text = "\r\n".join(r for r in self.rows if lo <= int(r.split(";")[1]) <= hi)
             return httpx.Response(200, text=text, headers={"content-type": "text/plain"})
         if path.endswith("/queries/recording/post"):
+            if payload["recording_id"] in self.missing:
+                return httpx.Response(420, json={"result": 3320})
             self.downloads.append(payload["recording_id"])
             return httpx.Response(302, headers={"location": f"https://files.mango.test/files/{payload['recording_id']}.mp3"})
         return httpx.Response(404)
@@ -63,8 +78,8 @@ def http_for(fake):
     return httpx.Client(transport=httpx.MockTransport(fake), follow_redirects=True)
 
 
-def client_for(fake, **kw):
-    return MangoClient("KEY", "SALT", http=http_for(fake), poll_interval=0, **kw)
+def client_for(fake, key="KEY", **kw):
+    return MangoClient(key, "SALT", http=http_for(fake), poll_interval=0, request_gap=0, retry_delays=(0, 0), **kw)
 
 
 # ---------------------------------------------------------------- разбор и клиент
@@ -91,6 +106,22 @@ def test_parse_stats_csv_and_direction():
     assert parse_stats_csv(FIELDS_ROW) == []  # строка заголовка пропускается
 
 
+def test_parse_real_formats():
+    # строки через \r\n, записи без скобок (как в примере документации), сотрудники как SIP-адреса
+    text = (
+        "[];1481630614;1481630633;1481630614;131;sip:a.mango@domain.mangosip.ru;;sip:user2@domain.mangosip.ru;1110;;abonent;e1\r\n"
+        "547658365,547658366;1072915314;1072915399;1072915320;;79161234567;;sip:admin1@clinic.mangosip.ru;1120;74232000000;abonent;e2\r\n"
+        "[MToxMjI3NTM6Mzc3OTkzMjA5NDow];1072915500;1072915600;0;;sip:admin2@clinic.mangosip.ru;;79004445566;1111;74232000000;abonent;e3\r\n"
+    )
+    calls = parse_stats_csv(text)
+    assert [c.recording_ids for c in calls] == [[], ["547658365", "547658366"], ["MToxMjI3NTM6Mzc3OTkzMjA5NDow"]]
+    assert calls[0].direction == "out" and calls[0].phone == "user2"  # SIP с обеих сторон, но есть добавочный
+    assert calls[1].direction == "in" and calls[1].phone == "79161234567" and calls[1].extension == "admin1"
+    assert calls[1].talk_seconds == 79 and calls[1].answered
+    assert calls[2].direction == "out" and calls[2].phone == "79004445566" and calls[2].extension == "admin2"
+    assert not calls[2].answered and calls[2].talk_seconds == 0  # answer = 0 — трубку не сняли
+
+
 def test_stats_polls_until_ready():
     fake = FakeMango(rows=[row("[r1]", NOW - 600, 90, to_ext="101", from_num="79001112233")], pending=2)
     calls = client_for(fake).stats(NOW - 3600, NOW)
@@ -101,9 +132,39 @@ def test_stats_polls_until_ready():
     assert req["date_from"] == str(NOW - 3600) and "records" in req["fields"].split(",")
 
 
+def test_rate_limit_retry_and_error_codes():
+    fake = FakeMango(rows=[row("[r1]", NOW - 600, 90, to_ext="101", from_num="79001112233")], busy=2)
+    assert len(client_for(fake).stats(NOW - 3600, NOW)) == 1  # два ответа 429, затем успех
+    fake = FakeMango(busy=10)
+    with pytest.raises(MangoError, match="перегружен"):
+        client_for(fake).stats(NOW - 60, NOW)
+
+    def answer(status, body):
+        return lambda request: httpx.Response(status, json=body)
+
+    cases = [
+        (answer(420, {"code": 3104}), "неверный формат параметра"),
+        (answer(200, {"result": 3102}), "отклонил ключи"),
+        (answer(200, {"result": 2000}), "баланс"),
+    ]
+    for handler, message in cases:
+        c = MangoClient("K", "S", http=httpx.Client(transport=httpx.MockTransport(handler)), request_gap=0)
+        with pytest.raises(MangoError, match=message):
+            c.stats(0, 1)
+
+    def expired(request):
+        if request.url.path.endswith("stats/request"):
+            return httpx.Response(200, json={"key": "B+DvIt8hPJReV8v4MYspQQA=="})
+        return httpx.Response(404)
+
+    c = MangoClient("K", "S", http=httpx.Client(transport=httpx.MockTransport(expired)), poll_interval=0, request_gap=0)
+    with pytest.raises(MangoError, match="не нашёл подготовленную выгрузку"):
+        c.stats(0, 1)
+
+
 def test_bad_keys_and_errors(tmp_path):
     fake = FakeMango()
-    bad = MangoClient("WRONG", "SALT", http=http_for(fake), poll_interval=0)
+    bad = client_for(fake, key="WRONG")
     with pytest.raises(MangoError, match="отклонил ключи"):
         bad.stats(NOW - 60, NOW)
     with pytest.raises(MangoError, match="Не указаны"):
@@ -119,9 +180,11 @@ def test_bad_keys_and_errors(tmp_path):
         return httpx.Response(200, json={"result": 3300}, headers={"content-type": "application/json"})
 
     c = MangoClient("K", "S", http=httpx.Client(transport=httpx.MockTransport(json_instead_of_file)))
-    with pytest.raises(MangoError, match="не отдал запись"):
+    with pytest.raises(MangoRecordingError, match="не отдал запись.*объект не найден"):
         c.download_recording("r1", tmp_path / "a.mp3")
     assert not (tmp_path / "a.mp3").exists() and not (tmp_path / "a.mp3.part").exists()
+    with pytest.raises(MangoRecordingError, match="запись разговора не найдена"):
+        client_for(FakeMango(missing={"gone"})).download_recording("gone", tmp_path / "b.mp3")
 
 
 def test_download_follows_redirect(tmp_path):
@@ -208,7 +271,7 @@ def test_scheduler_lines_filter_and_errors(settings):
     assert scheduler.run_clinic(clinic, now=NOW) == 1 and fake.downloads == ["b"]
 
     # ошибка ключей: окно не сдвигается, ошибка видна в настройках клиники
-    scheduler.client_for = lambda c: MangoClient("WRONG", "SALT", http=http_for(fake), poll_interval=0)
+    scheduler.client_for = lambda c: client_for(fake, key="WRONG")
     with app.state.session_factory() as s:
         synced = s.get(db.Clinic, clinic).mango_synced_until
     assert scheduler.run_clinic(clinic, now=NOW + 3600) == 0
@@ -216,6 +279,40 @@ def test_scheduler_lines_filter_and_errors(settings):
         c = s.get(db.Clinic, clinic)
         assert "отклонил ключи" in c.mango_last_error and c.mango_synced_until == synced
     assert "отклонил ключи" in client.get("/settings/clinic").text
+
+
+def test_scheduler_skips_missing_recording_and_picks_answered_leg(settings):
+    app, client, _, _ = make(settings)
+    clinic = app.state.first_clinic_id
+    client.post("/employees", data={"name": "Ольга", "mango_id": "102"})
+    enable_mango(app, clinic)
+    fake = FakeMango(
+        rows=[
+            # входящий на группу: у 101 звонил, но трубку не снял, ответила 102 — запись одна на оба плеча
+            row("[grp1]", NOW - 3000, 60, to_ext="101", from_num="79001112233", answered=False),
+            row("[grp1]", NOW - 2990, 150, to_ext="102", from_num="79001112233"),
+            row("[gone]", NOW - 2800, 100, to_ext="101", from_num="79005556677"),  # запись удалена из хранилища
+            row("[ok2]", NOW - 2700, 100, from_ext="101", to_num="79007778899"),
+        ],
+        missing={"gone"},
+    )
+    scheduler = MangoScheduler(settings, app.state.session_factory)
+    scheduler.client_for = lambda c: client_for(fake)
+    assert scheduler.run_clinic(clinic, now=NOW) == 2
+    with app.state.session_factory() as s:
+        calls = {c.external_id: c for c in s.scalars(select(db.Call).where(db.Call.source == "mango"))}
+        assert set(calls) == {"grp1", "ok2"}
+        assert calls["grp1"].employee.name == "Ольга" and calls["grp1"].mango_line == "102"
+        assert calls["grp1"].duration_sec == 150
+        c = s.get(db.Clinic, clinic)
+        assert c.mango_synced_until == NOW - SETTLE_SECONDS  # окно сдвинулось, загрузка не застряла
+        assert "Не удалось скачать записей: 1" in c.mango_last_error and "запись разговора не найдена" in c.mango_last_error
+
+    # запись появилась в хранилище — следующая проверка (окно с перекрытием) её заберёт
+    fake.missing.clear()
+    assert scheduler.run_clinic(clinic, now=NOW + 600) == 1
+    with app.state.session_factory() as s:
+        assert s.get(db.Clinic, clinic).mango_last_error == ""
 
 
 def test_due_clinics_and_test_connection(settings):
@@ -234,6 +331,6 @@ def test_due_clinics_and_test_connection(settings):
     scheduler.client_for = lambda c: client_for(fake)
     ok, message = scheduler.test_connection(clinic)
     assert ok and "Подключение работает" in message
-    scheduler.client_for = lambda c: MangoClient("WRONG", "SALT", http=http_for(fake), poll_interval=0)
+    scheduler.client_for = lambda c: client_for(fake, key="WRONG")
     ok, message = scheduler.test_connection(clinic)
     assert not ok and "отклонил ключи" in message
