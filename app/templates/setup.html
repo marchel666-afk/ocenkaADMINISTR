@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Первый запуск{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h2>Первый запуск</h2>
+  <p class="muted">Создайте учётную запись администратора сети. Под ней можно добавлять клиники и пользователей, настраивать критерии и подключение к Mango.</p>
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  <form class="stack" method="post" action="/setup">
+    <label class="field"><span>Логин</span><input type="text" name="username" value="{{ username or 'admin' }}" required></label>
+    <label class="field"><span>Пароль (не короче 6 символов)</span><input type="password" name="password" autocomplete="new-password" required></label>
+    <label class="field"><span>Пароль ещё раз</span><input type="password" name="password2" autocomplete="new-password" required></label>
+    <button class="btn btn-primary" type="submit">Создать и войти</button>
+  </form>
+</section>
+{% endblock %}

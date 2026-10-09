@@ -109,3 +109,22 @@ def settings(tmp_path) -> Settings:
     s.worker_enabled = False
     s.ensure_dirs()
     return s
+
+
+ADMIN_LOGIN = ("admin", "admin-pass")
+
+
+def setup_admin(client):
+    """Первый запуск: создаёт администратора сети и входит (cookie сохраняется в клиенте)."""
+    r = client.post("/setup", data={"username": ADMIN_LOGIN[0], "password": ADMIN_LOGIN[1], "password2": ADMIN_LOGIN[1]})
+    if "/login" in str(r.url):  # администратор уже создан (та же база) — просто входим
+        r = login(client, *ADMIN_LOGIN)
+    assert r.status_code == 200, r.text[:500]
+    return r
+
+
+def login(client, username, password):
+    client.cookies.clear()
+    r = client.post("/login", data={"username": username, "password": password})
+    assert "Неверный логин" not in r.text
+    return r

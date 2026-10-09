@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Учётная запись{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h2>{{ ctx.username }}</h2>
+  <p class="muted">{{ ROLE_LABELS[ctx.role] }}{% if not ctx.is_admin %} · {{ ctx.clinic_name }}{% endif %}</p>
+  <h3>Сменить пароль</h3>
+  <form class="stack" method="post" action="/account/password">
+    <label class="field"><span>Текущий пароль</span><input type="password" name="old_password" autocomplete="current-password" required></label>
+    <label class="field"><span>Новый пароль</span><input type="password" name="new_password" autocomplete="new-password" required></label>
+    <label class="field"><span>Новый пароль ещё раз</span><input type="password" name="new_password2" autocomplete="new-password" required></label>
+    <button class="btn btn-primary" type="submit">Сменить пароль</button>
+  </form>
+</section>
+{% endblock %}

@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}Критерии оценки{% endblock %}
+{% block content %}
+<div class="editor">
+  <aside class="card editor-nav">
+    <h2>Разделы</h2>
+    <ul class="section-list">
+      {% for sc in scenarios %}
+      <li class="{% if current and sc.id == current.id %}active{% endif %}">
+        <a href="/settings/checklist?section={{ sc.id }}">
+          {{ sc.title }}
+          <span class="muted small">{% if sc.key != GENERAL_KEY %}{{ DIRECTION_LABELS.get(sc.direction, '') }} · {% endif %}{{ counts.get(sc.id, 0) }} п.</span>
+        </a>
+        {% if sc.key != GENERAL_KEY %}
+        <span class="move">
+          <form method="post" action="/settings/checklist/sections/{{ sc.id }}/move"><input type="hidden" name="direction" value="up"><button class="icon-btn" title="Выше">↑</button></form>
+          <form method="post" action="/settings/checklist/sections/{{ sc.id }}/move"><input type="hidden" name="direction" value="down"><button class="icon-btn" title="Ниже">↓</button></form>
+        </span>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    <details class="add-block">
+      <summary class="btn btn-small">+ Новый сценарий</summary>
+      <form class="stack" method="post" action="/settings/checklist/sections">
+        <label class="field"><span>Название</span><input type="text" name="title" placeholder="Исходящий звонок — повторная консультация" required></label>
+        <label class="field"><span>Направление</span>
+          <select name="direction" required><option value="in">входящий</option><option value="out">исходящий</option></select>
+        </label>
+        <label class="field"><span>Когда применяется (подсказка ИИ для выбора сценария)</span>
+          <textarea name="description" rows="3" placeholder="Администратор звонит пациенту, чтобы…"></textarea></label>
+        <label class="field"><span>Код раздела (латиница, необязательно)</span><input type="text" name="prefix" maxlength="4" placeholder="например, PK"></label>
+        <button class="btn btn-primary" type="submit">Добавить сценарий</button>
+      </form>
+    </details>
+  </aside>
+
+  <div class="editor-main">
+    {% if current %}
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ current.title }}</h2>
+        {% if current.key != GENERAL_KEY %}
+        <form method="post" action="/settings/checklist/sections/{{ current.id }}/delete" onsubmit="return confirm('Удалить сценарий «{{ current.title }}» со всеми пунктами? Выставленные оценки сохранятся.')">
+          <button class="btn btn-small btn-danger" type="submit">Удалить сценарий</button>
+        </form>
+        {% endif %}
+      </div>
+      <p class="muted small">
+        {% if current.key == GENERAL_KEY %}Общие правила применяются к каждому звонку вместе с пунктами его сценария.
+        {% else %}Для каждого звонка ИИ выбирает один сценарий по описанию ниже и оценивает его пункты вместе с общими правилами.{% endif %}
+      </p>
+      <form class="grid-form" method="post" action="/settings/checklist/sections/{{ current.id }}">
+        <label class="field wide"><span>Название</span><input type="text" name="title" value="{{ current.title }}" required></label>
+        {% if current.key != GENERAL_KEY %}
+        <label class="field"><span>Направление</span>
+          <select name="direction">
+            <option value="in" {% if current.direction == 'in' %}selected{% endif %}>входящий</option>
+            <option value="out" {% if current.direction == 'out' %}selected{% endif %}>исходящий</option>
+          </select>
+        </label>
+        <label class="field wide"><span>Когда применяется (подсказка ИИ для выбора сценария)</span>
+          <textarea name="description" rows="2">{{ current.description }}</textarea></label>
+        {% endif %}
+        <div class="field actions"><button class="btn" type="submit">Сохранить раздел</button></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Пункты <span class="muted">({{ criteria|length }})</span></h2>
+      {% for c in criteria %}
+      <div class="crit {% if not c.evaluable %}crit-off{% endif %}" id="c{{ c.id }}">
+        <div class="crit-head">
+          <span class="tag">{{ c.code }}</span>
+          <b>{{ c.num }}.</b>
+          <span class="crit-text">{{ c.text }}</span>
+          <span class="weight weight-{{ c.weight_key }}">{{ WEIGHT_LABELS[c.weight_key] }}</span>
+          {% if not c.evaluable %}<span class="muted small">не оценивается по записи</span>{% endif %}
+          <span class="move">
+            <form method="post" action="/settings/checklist/criteria/{{ c.id }}/move"><input type="hidden" name="direction" value="up"><button class="icon-btn" title="Выше">↑</button></form>
+            <form method="post" action="/settings/checklist/criteria/{{ c.id }}/move"><input type="hidden" name="direction" value="down"><button class="icon-btn" title="Ниже">↓</button></form>
+          </span>
+        </div>
+        {% if c.hint %}<div class="muted small hint">Подсказка ИИ: {{ c.hint }}</div>{% endif %}
+        <details>
+          <summary class="link">Изменить</summary>
+          <form class="grid-form" method="post" action="/settings/checklist/criteria/{{ c.id }}">
+            <label class="field short-field"><span>№</span><input type="text" name="num" value="{{ c.num }}"></label>
+            <label class="field"><span>Значимость</span>
+              <select name="weight">{% for k, label in WEIGHT_LABELS.items() %}<option value="{{ k }}" {% if c.weight_key == k %}selected{% endif %}>{{ label }} ({{ weights[k]|weight }} б.)</option>{% endfor %}</select>
+            </label>
+            <label class="field check"><input type="checkbox" name="evaluable" value="1" {% if c.evaluable %}checked{% endif %}> оценивать по записи</label>
+            <label class="field wide"><span>Требование</span><textarea name="text" rows="2" required>{{ c.text }}</textarea></label>
+            <label class="field wide"><span>Подсказка для ИИ: как трактовать пункт, когда он «не применим»</span><textarea name="hint" rows="3">{{ c.hint }}</textarea></label>
+            <div class="field actions btn-row">
+              <button class="btn btn-primary" type="submit">Сохранить</button>
+            </div>
+          </form>
+          <form method="post" action="/settings/checklist/criteria/{{ c.id }}/delete" onsubmit="return confirm('Удалить пункт {{ c.code }}? Выставленные по нему оценки сохранятся.')">
+            <button class="btn btn-small btn-danger" type="submit">Удалить пункт</button>
+          </form>
+        </details>
+      </div>
+      {% else %}
+      <p class="muted">В разделе пока нет пунктов.</p>
+      {% endfor %}
+
+      <details class="add-block" {% if not criteria %}open{% endif %}>
+        <summary class="btn">+ Добавить пункт</summary>
+        <form class="grid-form" method="post" action="/settings/checklist/criteria">
+          <input type="hidden" name="scenario_id" value="{{ current.id }}">
+          <label class="field short-field"><span>№</span><input type="text" name="num" placeholder="{{ criteria|length + 1 }}"></label>
+          <label class="field"><span>Значимость</span>
+            <select name="weight">{% for k, label in WEIGHT_LABELS.items() %}<option value="{{ k }}" {% if k == 'medium' %}selected{% endif %}>{{ label }} ({{ weights[k]|weight }} б.)</option>{% endfor %}</select>
+          </label>
+          <label class="field check"><input type="checkbox" name="evaluable" value="1" checked> оценивать по записи</label>
+          <label class="field wide"><span>Требование</span><textarea name="text" rows="2" required placeholder="Сотрудник называет стоимость приёма"></textarea></label>
+          <label class="field wide"><span>Подсказка для ИИ (необязательно)</span><textarea name="hint" rows="2" placeholder="Если запись не состоялась — «не применимо»."></textarea></label>
+          <div class="field actions"><button class="btn btn-primary" type="submit">Добавить</button></div>
+        </form>
+      </details>
+    </section>
+    {% endif %}
+
+    <section class="card">
+      <h2>Баллы за значимость</h2>
+      <p class="muted small">Итог звонка — средневзвешенный процент: пункт «Да» приносит свои баллы, «Не применимо» в расчёт не входит. Новые баллы применяются к следующим оценкам.</p>
+      <form class="inline-form" method="post" action="/settings/checklist/weights">
+        {% for k, label in WEIGHT_LABELS.items() %}
+        <label class="field"><span>{{ label }}</span><input type="number" name="{{ k }}" value="{{ weights[k]|weight }}" min="0" step="0.5" class="short"></label>
+        {% endfor %}
+        <button class="btn" type="submit">Сохранить баллы</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Перенос и шаблоны</h2>
+      <div class="btn-row">
+        <a class="btn" href="/settings/checklist/export.yaml">Выгрузить чек-лист (YAML)</a>
+        <form class="inline-form" method="post" action="/settings/checklist/import" enctype="multipart/form-data"
+              onsubmit="return confirm('Заменить чек-лист клиники содержимым файла?')">
+          <input type="file" name="file" accept=".yaml,.yml" required>
+          <button class="btn" type="submit">Загрузить из файла</button>
+        </form>
+      </div>
+      <div class="btn-row">
+        <form method="post" action="/settings/checklist/reset" onsubmit="return confirm('Заменить чек-лист клиники стандартным шаблоном? Ваши правки пунктов пропадут, выставленные оценки сохранятся.')">
+          <button class="btn btn-danger" type="submit">Сбросить к шаблону</button>
+        </form>
+        {% if other_clinics %}
+        <form class="inline-form" method="post" action="/settings/checklist/copy" onsubmit="return confirm('Заменить чек-лист этой клиники чек-листом выбранной?')">
+          <select name="source_clinic_id">{% for cid, cname in other_clinics %}<option value="{{ cid }}">{{ cname }}</option>{% endfor %}</select>
+          <button class="btn" type="submit">Скопировать из клиники</button>
+        </form>
+        {% endif %}
+      </div>
+      <p class="muted small">Выгрузку можно отредактировать в любом текстовом редакторе и загрузить в другую клинику. Пункты сопоставляются по коду (G01, IN04…): оценки по ним сохраняют историю.</p>
+    </section>
+  </div>
+</div>
+{% endblock %}

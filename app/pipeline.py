@@ -10,9 +10,10 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import db
-from .checklists import GENERAL_KEY, NOT_TARGET, ChecklistSet
+from .checklists import GENERAL_KEY, NOT_TARGET, ChecklistSet, load_clinic_checklists
 from .config import Settings
 from .evaluation import Evaluation, Evaluator, Usage
+from .llm import LLMClient
 from .scoring import weighted_score
 from .transcription import Transcriber, Transcript, apply_admin_speaker
 
@@ -35,19 +36,19 @@ def match_employee(session: Session, clinic_id: int, name: str | None) -> db.Emp
 
 
 class Processor:
+    """Обрабатывает звонок по чек-листу и настройкам его клиники."""
+
     def __init__(
         self,
         settings: Settings,
         session_factory: sessionmaker,
-        checklists: ChecklistSet,
         transcriber: Transcriber,
-        evaluator: Evaluator,
+        llm: LLMClient,
     ):
         self.settings = settings
         self.session_factory = session_factory
-        self.checklists = checklists
         self.transcriber = transcriber
-        self.evaluator = evaluator
+        self.llm = llm
 
     def _set_status(self, call_id: int, status: str, message: str = "") -> None:
         with self.session_factory() as s:
@@ -79,17 +80,23 @@ class Processor:
                 s.commit()
             transcript = Transcript.from_json(call.transcript_json)
 
-            if call.source != "text" and transcript.duration and transcript.duration < self.settings.min_call_seconds:
-                return self._skip(s, call, f"Слишком короткий звонок (меньше {self.settings.min_call_seconds} с)")
+            clinic = s.get(db.Clinic, call.clinic_id)
+            min_seconds = clinic.min_call_seconds if clinic.min_call_seconds is not None else self.settings.min_call_seconds
+            if call.source != "text" and transcript.duration and transcript.duration < min_seconds:
+                return self._skip(s, call, f"Слишком короткий звонок (меньше {min_seconds} с)")
             if transcript.is_empty:
                 return self._skip(s, call, "В записи не распознана речь")
 
             call.status = db.EVALUATING
             s.commit()
             usage = Usage()
+            checklists = load_clinic_checklists(s, call.clinic_id)
+            evaluator = Evaluator(checklists, self.llm, self.settings.llm_classify_model, self.settings.llm_model)
+            if call.call_type and call.call_type_manual and call.call_type not in checklists.scenarios:
+                raise RuntimeError("Выбранного вручную сценария больше нет в чек-листе клиники — выберите другой тип")
 
             if not call.call_type_manual or not call.call_type:
-                cls = self.evaluator.classify(transcript, call.direction, call.started_at, usage)
+                cls = evaluator.classify(transcript, call.direction, call.started_at, usage)
                 call.call_type = cls.call_type
                 call.classification_reason = cls.reason
                 if apply_admin_speaker(transcript, cls.admin_speaker):
@@ -102,10 +109,10 @@ class Processor:
                     self._save_usage(call, usage)
                     return self._skip(s, call, f"Нецелевой звонок: {cls.reason}")
 
-            evaluation = self.evaluator.evaluate(
+            evaluation = evaluator.evaluate(
                 transcript, call.call_type, call.direction, call.started_at, usage, model=call.llm_model_override
             )
-            self._save_evaluation(call, evaluation)
+            self._save_evaluation(call, evaluation, checklists)
             self._save_usage(call, usage)
             call.status = db.DONE
             call.status_message = "; ".join(evaluation.warnings)
@@ -127,9 +134,10 @@ class Processor:
         call.llm_tokens = (call.llm_tokens or 0) + usage.prompt_tokens + usage.completion_tokens
         call.llm_cost_usd = (call.llm_cost_usd or 0.0) + usage.cost_usd
 
-    def _save_evaluation(self, call: db.Call, evaluation: Evaluation) -> None:
-        general = self.checklists.general
-        scenario = self.checklists.scenario(evaluation.call_type)
+    @staticmethod
+    def _save_evaluation(call: db.Call, evaluation: Evaluation, checklists: ChecklistSet) -> None:
+        general = checklists.general
+        scenario = checklists.scenario(evaluation.call_type)
         results = {cid: v.result for cid, v in evaluation.verdicts.items()}
 
         call.evaluation_json = evaluation.to_json()
@@ -149,6 +157,10 @@ class Processor:
                         weight=c.weight,
                         evidence=v.evidence,
                         comment=v.comment,
+                        criterion_num=c.num,
+                        criterion_text=c.text,
+                        checklist_title=checklist.title,
+                        weight_key=c.weight_key,
                     )
                 )
 

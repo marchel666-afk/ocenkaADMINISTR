@@ -17,6 +17,16 @@ from .checklists import ChecklistSet
 from .scoring import NA, NO, RESULT_LABELS, YES
 
 
+def call_type_title(call: db.Call, checklists: ChecklistSet) -> str:
+    """Название сценария звонка; если сценарий удалён из чек-листа — из сохранённой оценки."""
+    if call.call_type in checklists.scenarios or not call.call_type:
+        return checklists.scenario_title(call.call_type)
+    for r in call.results:
+        if r.checklist == call.call_type and r.checklist_title:
+            return r.checklist_title
+    return checklists.scenario_title(call.call_type)
+
+
 def period_start(days: int) -> datetime | None:
     return datetime.now() - timedelta(days=days) if days > 0 else None
 
@@ -96,14 +106,33 @@ def criterion_stats(
     for scenario in checklists.scenarios.values():
         titles.update({c.id: scenario.title for c in scenario.criteria})
 
+    # Формулировка — из текущего чек-листа, а для удалённых пунктов — из сохранённой в оценке.
+    snapshots = {
+        cid: (num, text, title)
+        for cid, num, text, title in s.execute(
+            select(
+                db.CriterionResult.criterion_id,
+                func.max(db.CriterionResult.criterion_num),
+                func.max(db.CriterionResult.criterion_text),
+                func.max(db.CriterionResult.checklist_title),
+            )
+            .join(db.Call, db.Call.id == db.CriterionResult.call_id)
+            .where(db.Call.clinic_id == clinic_id, db.CriterionResult.criterion_id.in_(list(counts)))
+            .group_by(db.CriterionResult.criterion_id)
+        )
+    }
+
     stats = []
     for cid, c in counts.items():
         criterion = checklists.criterion(cid)
-        if criterion is None:  # пункт удалён из чек-листа
+        if criterion is not None:
+            num, text, title = criterion.num, criterion.text, titles.get(cid, "")
+        elif cid in snapshots and snapshots[cid][1]:
+            num, text, title = snapshots[cid]
+            title = f"{title} (пункт удалён)" if title else "пункт удалён"
+        else:
             continue
-        stats.append(
-            CriterionStats(cid, criterion.num, criterion.text, titles.get(cid, ""), c[NO], c[YES] + c[NO])
-        )
+        stats.append(CriterionStats(cid, num, text, title, c[NO], c[YES] + c[NO]))
     return sorted(stats, key=lambda x: (-x.failed, -x.fail_rate, x.criterion_id))
 
 
@@ -161,7 +190,7 @@ def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: dat
     for call in calls:
         when = call.when.strftime("%d.%m.%Y %H:%M")
         admin = call.employee.name if call.employee else "Не указан"
-        ctype = checklists.scenario_title(call.call_type)
+        ctype = call_type_title(call, checklists)
         status = "Оценён" if call.status == db.DONE else f"Не оценивается: {call.status_message}"
         ws_calls.append([
             call.id, when, admin, ctype, round(call.duration_sec or 0),
@@ -169,9 +198,12 @@ def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: dat
         ])
         for r in call.results:
             c = checklists.criterion(r.criterion_id)
+            num = r.criterion_num or (c.num if c else "")
+            text = r.criterion_text or (c.text if c else "")
+            weight_key = r.weight_key or (c.weight_key if c else "")
             ws_items.append([
-                call.id, when, admin, ctype, r.criterion_id, c.num if c else "", c.text if c else "",
-                checklists.weight_labels.get(c.weight_key, "") if c else "",
+                call.id, when, admin, ctype, r.criterion_id, num, text,
+                checklists.weight_labels.get(weight_key, ""),
                 RESULT_LABELS.get(r.result, r.result), r.evidence, r.comment,
             ])
             if r.result in _RESULT_FILLS:

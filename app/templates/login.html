@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Вход{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h2>Вход</h2>
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  <form class="stack" method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label class="field"><span>Логин</span><input type="text" name="username" autocomplete="username" required autofocus></label>
+    <label class="field"><span>Пароль</span><input type="password" name="password" autocomplete="current-password" required></label>
+    <button class="btn btn-primary" type="submit">Войти</button>
+  </form>
+</section>
+{% endblock %}

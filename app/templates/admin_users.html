@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Пользователи{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Пользователи</h2>
+  <p class="muted small">Администратор сети видит все клиники и управляет ими. Руководитель клиники видит звонки, сводку, сотрудников, критерии и настройки только своей клиники.</p>
+  <table class="table">
+    <thead><tr><th>Логин</th><th>Роль и клиника</th><th>Новый пароль</th><th>Активен</th><th></th></tr></thead>
+    <tbody>
+    {% for u in users %}
+      <tr class="{% if not u.active %}row-skip{% endif %}">
+        <td><b>{{ u.username }}</b></td>
+        <td colspan="4">
+          <form class="inline-form" method="post" action="/admin/users/{{ u.id }}">
+            <select name="role">{% for k, label in ROLE_LABELS.items() %}<option value="{{ k }}" {% if u.role == k %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+            <select name="clinic_id">
+              <option value="">— клиника —</option>
+              {% for c in clinics %}<option value="{{ c.id }}" {% if u.clinic_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+            </select>
+            <input type="password" name="password" placeholder="не менять" autocomplete="new-password" class="short">
+            <label class="check"><input type="checkbox" name="active" value="1" {% if u.active %}checked{% endif %}> активен</label>
+            <button class="btn btn-small" type="submit">Сохранить</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Добавить пользователя</h2>
+  <form class="grid-form" method="post" action="/admin/users">
+    <label class="field"><span>Логин</span><input type="text" name="username" required autocomplete="off"></label>
+    <label class="field"><span>Пароль (не короче {{ min_password }} символов)</span><input type="password" name="password" required autocomplete="new-password"></label>
+    <label class="field"><span>Роль</span>
+      <select name="role">{% for k, label in ROLE_LABELS.items() %}<option value="{{ k }}" {% if k == 'manager' %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+    </label>
+    <label class="field"><span>Клиника (для руководителя)</span>
+      <select name="clinic_id">{% for c in clinics if c.active %}<option value="{{ c.id }}">{{ c.name }}</option>{% endfor %}</select>
+    </label>
+    <div class="field actions"><button class="btn btn-primary" type="submit">Создать</button></div>
+  </form>
+</section>
+{% endblock %}

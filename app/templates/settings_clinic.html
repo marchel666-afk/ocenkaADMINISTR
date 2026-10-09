@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Настройки клиники{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Клиника</h2>
+  <form class="grid-form" method="post" action="/settings/clinic">
+    <label class="field wide"><span>Название</span><input type="text" name="name" value="{{ clinic.name }}" required></label>
+    <label class="field"><span>Местное время клиники</span>
+      <select name="utc_offset">
+        {% for h in range(2, 13) %}<option value="{{ h }}" {% if clinic.utc_offset == h %}selected{% endif %}>UTC+{{ h }}{% if h == 3 %} (Москва){% elif h == 7 %} (Новосибирск){% elif h == 10 %} (Владивосток){% endif %}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field"><span>Не оценивать звонки короче, с</span>
+      <input type="number" name="min_call_seconds" min="0" value="{{ clinic.min_call_seconds if clinic.min_call_seconds is not none else '' }}" placeholder="{{ default_min_seconds }} (по умолчанию)"></label>
+    <label class="field wide"><span>Сведения о клинике для ИИ: профиль, услуги, адрес, акции, правила записи</span>
+      <textarea name="ai_context" rows="10">{{ clinic.ai_context }}</textarea></label>
+    <div class="field actions"><button class="btn btn-primary" type="submit">Сохранить</button></div>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2>Mango Office — автоматическая загрузка звонков</h2>
+    {% if clinic.mango_enabled %}<span class="status status-done">включена</span>{% else %}<span class="status">выключена</span>{% endif %}
+  </div>
+  <p class="muted small">
+    Сервис сам забирает записи разговоров через API виртуальной АТС клиники. Ключи — в личном кабинете Mango:
+    «Интеграции» → «API Коннектор»: <b>уникальный код вашей АТС</b> и <b>ключ для создания подписи</b>.
+    Запись разговоров в Mango должна быть включена.
+  </p>
+  <form class="grid-form" method="post" action="/settings/mango">
+    <label class="field check wide"><input type="checkbox" name="enabled" value="1" {% if clinic.mango_enabled %}checked{% endif %}> забирать звонки автоматически</label>
+    <label class="field"><span>Уникальный код АТС (vpbx_api_key)</span>
+      <input type="text" name="api_key" autocomplete="off" placeholder="{{ 'задан — оставьте пустым, чтобы не менять' if clinic.mango_api_key else '' }}"></label>
+    <label class="field"><span>Ключ для создания подписи (salt)</span>
+      <input type="password" name="api_salt" autocomplete="new-password" placeholder="{{ 'задан — оставьте пустым, чтобы не менять' if clinic.mango_api_salt else '' }}"></label>
+    <label class="field"><span>Проверять новые звонки каждые, мин</span>
+      <input type="number" name="interval_min" min="10" max="1440" value="{{ clinic.mango_interval_min }}"></label>
+    <label class="field"><span>Часовой пояс аккаунта Mango (для имён файлов)</span>
+      <select name="mango_utc_offset">
+        {% for h in range(2, 13) %}<option value="{{ h }}" {% if clinic.mango_utc_offset == h %}selected{% endif %}>UTC+{{ h }}{% if h == 3 %} (Москва){% endif %}</option>{% endfor %}
+      </select>
+    </label>
+    <label class="field wide"><span>Только эти добавочные номера / линии (через запятую; пусто — все звонки АТС)</span>
+      <input type="text" name="lines" value="{{ clinic.mango_lines }}" placeholder="например: 101, 102"></label>
+    <div class="field actions"><button class="btn btn-primary" type="submit">Сохранить</button></div>
+  </form>
+
+  <div class="btn-row">
+    <form method="post" action="/settings/mango/test"><button class="btn" type="submit" {% if not scheduler_enabled %}disabled{% endif %}>Проверить подключение</button></form>
+    <form class="inline-form" method="post" action="/settings/mango/import">
+      <select name="days">
+        <option value="0">новые звонки</option>
+        <option value="1">за последние сутки</option>
+        <option value="3">за 3 дня</option>
+        <option value="7">за неделю</option>
+      </select>
+      <button class="btn" type="submit" {% if not scheduler_enabled or running %}disabled{% endif %}>Загрузить сейчас</button>
+    </form>
+  </div>
+  <dl class="meta">
+    <dt>Последняя проверка</dt><dd>{{ clinic.mango_last_run|dt }}{% if running %} · <b>идёт загрузка…</b>{% endif %}</dd>
+    <dt>Загружено звонков</dt><dd>{{ clinic.mango_last_count }}</dd>
+    {% if clinic.mango_last_error %}<dt>Ошибка</dt><dd class="error-text">{{ clinic.mango_last_error }}</dd>{% endif %}
+  </dl>
+</section>
+{% endblock %}

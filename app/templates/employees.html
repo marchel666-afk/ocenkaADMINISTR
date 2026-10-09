@@ -3,20 +3,22 @@
 {% block content %}
 <section class="card">
   <h2>Сотрудники</h2>
-  <p class="muted small">Если при загрузке администратор не выбран, сервис ищет его здесь по имени, которым он представился в разговоре.</p>
+  <p class="muted small">Сервис сам привязывает звонок к сотруднику: по добавочному номеру в Mango или по имени, которым администратор представился в разговоре.</p>
   <form class="inline-form" method="post" action="/employees">
     <input type="text" name="name" placeholder="Имя Фамилия" required>
+    <input type="text" name="mango_id" placeholder="Добавочный в Mango" class="short">
     <button class="btn btn-primary" type="submit">Добавить</button>
   </form>
   {% if employees %}
   <table class="table">
-    <thead><tr><th>Имя</th><th>Звонков</th><th>Статус</th><th></th></tr></thead>
+    <thead><tr><th>Имя и добавочный в Mango</th><th>Звонков</th><th>Статус</th><th></th></tr></thead>
     <tbody>
     {% for e in employees %}
       <tr class="{% if not e.active %}row-skip{% endif %}">
         <td>
           <form class="inline-form" method="post" action="/employees/{{ e.id }}/rename">
             <input type="text" name="name" value="{{ e.name }}">
+            <input type="text" name="mango_id" value="{{ e.mango_id or '' }}" placeholder="добавочный" class="short">
             <button class="btn btn-small" type="submit">Сохранить</button>
           </form>
         </td>

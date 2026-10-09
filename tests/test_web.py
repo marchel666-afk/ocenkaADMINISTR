@@ -9,14 +9,17 @@ from app import db
 from app.transcription import Segment, Transcript
 from app.web import create_app, guess_datetime
 
-from .conftest import FakeLLM, FakeTranscriber, sample_text
+from .conftest import FakeLLM, FakeTranscriber, sample_text, setup_admin
 
 
-def make(settings, transcriber=None, llm=None):
+def make(settings, transcriber=None, llm=None, login=True):
     transcriber = transcriber or FakeTranscriber()
     llm = llm or FakeLLM()
     app = create_app(settings, transcriber=transcriber, llm=llm)
-    return app, TestClient(app), transcriber, llm
+    client = TestClient(app)
+    if login:
+        setup_admin(client)
+    return app, client, transcriber, llm
 
 
 def process_all(app):
@@ -138,12 +141,16 @@ def test_update_call_type_requeues(settings):
     assert get_call(app) is None
 
 
-def test_password(settings):
-    settings.app_password = "secret"
-    app, client, _, _ = make(settings)
-    assert client.get("/calls").status_code == 401
-    assert client.get("/calls", auth=("admin", "wrong")).status_code == 401
-    assert client.get("/calls", auth=("admin", "secret")).status_code == 200
+def test_app_password_creates_admin(settings):
+    """Старые установки с APP_PASSWORD: создаётся пользователь admin с этим паролем."""
+    settings.app_password = "secret1"
+    app, client, _, _ = make(settings, login=False)
+    r = client.get("/calls", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"].startswith("/login")
+    r = client.post("/login", data={"username": "admin", "password": "wrong"})
+    assert "Неверный логин или пароль" in r.text
+    r = client.post("/login", data={"username": "admin", "password": "secret1", "next": "/stats"})
+    assert r.status_code == 200 and "Сводка по администраторам" in r.text
 
 
 def test_mango_filename():
@@ -197,7 +204,7 @@ def test_match_employee(settings):
     for name in ("Анна Смирнова", "Мария Иванова", "Мария Петрова"):
         client.post("/employees", data={"name": name})
     with app.state.session_factory() as s:
-        clinic = app.state.clinic_id
+        clinic = app.state.first_clinic_id
         assert match_employee(s, clinic, "Анна").name == "Анна Смирнова"
         assert match_employee(s, clinic, "анна смирнова").name == "Анна Смирнова"
         assert match_employee(s, clinic, "Мария") is None  # две Марии — не угадываем

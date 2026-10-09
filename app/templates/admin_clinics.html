@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Клиники сети{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>Клиники и колл-центры</h2>
+  <table class="table">
+    <thead><tr><th>Название</th><th>Звонков</th><th>Пользователей</th><th>Mango</th><th>Статус</th><th></th></tr></thead>
+    <tbody>
+    {% for c in clinics %}
+      <tr class="{% if not c.active %}row-skip{% endif %}">
+        <td>{% if c.active %}<form class="inline" method="post" action="/switch-clinic"><input type="hidden" name="clinic_id" value="{{ c.id }}"><input type="hidden" name="back" value="/calls"><button class="link-btn" type="submit">{{ c.name }}</button></form>{% else %}{{ c.name }}{% endif %}</td>
+        <td>{{ calls.get(c.id, 0) }}</td>
+        <td>{{ users.get(c.id, 0) }}</td>
+        <td>{% if c.mango_enabled %}автозагрузка{% if c.mango_last_error %} · <span class="error-text">ошибка</span>{% endif %}{% else %}—{% endif %}</td>
+        <td>{{ 'работает' if c.active else 'отключена' }}</td>
+        <td><form method="post" action="/admin/clinics/{{ c.id }}/toggle"><button class="btn btn-small" type="submit">{{ 'Отключить' if c.active else 'Включить' }}</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <h2>Добавить клинику</h2>
+  <form class="grid-form" method="post" action="/admin/clinics">
+    <label class="field wide"><span>Название</span><input type="text" name="name" required placeholder="Варикоза нет — Хабаровск"></label>
+    <label class="field"><span>Местное время</span>
+      <select name="utc_offset">{% for h in range(2, 13) %}<option value="{{ h }}" {% if h == 3 %}selected{% endif %}>UTC+{{ h }}</option>{% endfor %}</select>
+    </label>
+    <label class="field"><span>Критерии оценки</span>
+      <select name="copy_from">
+        <option value="template">стандартный шаблон</option>
+        {% for c in clinics if c.active %}<option value="{{ c.id }}">как в клинике «{{ c.name }}»</option>{% endfor %}
+      </select>
+    </label>
+    <div class="field actions"><button class="btn btn-primary" type="submit">Создать</button></div>
+  </form>
+  <p class="muted small">После создания откроются настройки новой клиники: заполните сведения для ИИ и подключение к Mango, затем создайте руководителю учётную запись в разделе «Пользователи».</p>
+</section>
+{% endblock %}

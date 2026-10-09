@@ -71,7 +71,7 @@
       <tr class="clickable" onclick="location.href='/calls/{{ c.id }}'">
         <td><a href="/calls/{{ c.id }}">{{ c.when|dt }}</a></td>
         <td>{{ c.employee.name if c.employee else '—' }}</td>
-        <td>{{ scenario_title(c.call_type) if c.call_type else '—' }}</td>
+        <td>{{ type_title(c) if c.call_type else '—' }}</td>
         <td>{{ c.duration_sec|duration }}</td>
         <td><span class="score {{ c.score_total|score_class }}">{{ c.score_total|score }}</span></td>
         <td><span class="status status-{{ c.status }}">{{ STATUS_LABELS[c.status] }}</span></td>

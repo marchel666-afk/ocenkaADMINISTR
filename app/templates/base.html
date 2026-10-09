@@ -3,23 +3,42 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Оценка звонков{% endblock %} — {{ clinic_name }}</title>
+  <title>{% block title %}Оценка звонков{% endblock %}{% if ctx %} — {{ ctx.clinic_name }}{% endif %}</title>
   <link rel="stylesheet" href="/static/style.css">
   {% block head %}{% endblock %}
 </head>
 <body>
   <header class="topbar">
     <div class="wrap topbar-inner">
-      <a class="brand" href="/calls">Оценка звонков <span>{{ clinic_name }}</span></a>
+      <a class="brand" href="/calls">Оценка звонков</a>
+      {% if ctx %}
+      {% if ctx.clinics|length > 1 %}
+      <form class="clinic-switch" method="post" action="/switch-clinic">
+        <input type="hidden" name="back" value="{{ request.url.path }}">
+        <select name="clinic_id" onchange="this.form.submit()" aria-label="Клиника">
+          {% for cid, cname in ctx.clinics %}<option value="{{ cid }}" {% if cid == ctx.clinic_id %}selected{% endif %}>{{ cname }}</option>{% endfor %}
+        </select>
+      </form>
+      {% else %}
+      <span class="clinic-name">{{ ctx.clinic_name }}</span>
+      {% endif %}
       <nav>
         <a href="/calls">Звонки</a>
         <a href="/stats">Сводка</a>
         <a href="/employees">Сотрудники</a>
+        <a href="/settings/checklist">Критерии</a>
+        <a href="/settings/clinic">Клиника</a>
+        {% if ctx.is_admin %}<a href="/admin/clinics">Сеть</a><a href="/admin/users">Пользователи</a>{% endif %}
+        <a href="/account" title="{{ ROLE_LABELS[ctx.role] }}">{{ ctx.username }}</a>
+        <form method="post" action="/logout" class="inline"><button class="link-btn" type="submit">Выйти</button></form>
       </nav>
+      {% endif %}
     </div>
   </header>
   <main class="wrap">
-    {% if api_key_missing %}
+    {% if flash %}<div class="alert alert-ok">{{ flash }}</div>{% endif %}
+    {% if flash_error %}<div class="alert alert-error">{{ flash_error }}</div>{% endif %}
+    {% if ctx and api_key_missing %}
     <div class="alert alert-warn">
       Не задан ключ OpenRouter (<code>OPENROUTER_API_KEY</code> в файле <code>.env</code>) — звонки будут расшифровываться, но не оцениваться.
     </div>

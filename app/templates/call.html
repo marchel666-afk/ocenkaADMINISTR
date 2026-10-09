@@ -10,7 +10,7 @@
     <dl>
       <dt>Дата</dt><dd>{{ call.when|dt }}{% if not call.started_at %} <span class="muted">(время загрузки)</span>{% endif %}</dd>
       <dt>Администратор</dt><dd>{{ call.employee.name if call.employee else 'не указан' }}</dd>
-      <dt>Тип звонка</dt><dd>{{ scenario_title(call.call_type) if call.call_type else '—' }}{% if call.call_type and not call.call_type_manual %} <span class="muted">(определён автоматически)</span>{% endif %}</dd>
+      <dt>Тип звонка</dt><dd>{{ type_title if call.call_type else '—' }}{% if call.call_type and not call.call_type_manual %} <span class="muted">(определён автоматически)</span>{% endif %}</dd>
       <dt>Направление</dt><dd>{{ DIRECTIONS.get(call.direction, '—') }}</dd>
       {% if call.phone %}<dt>Телефон</dt><dd>{{ call.phone }}{% if call.mango_line %} <span class="muted">· линия {{ call.mango_line }}</span>{% endif %}</dd>{% endif %}
       <dt>Длительность</dt><dd>{{ call.duration_sec|duration }}</dd>
@@ -81,22 +81,21 @@
   <table class="table criteria">
     <thead><tr><th>№</th><th>Пункт</th><th>Значимость</th><th>Оценка</th><th>Обоснование</th></tr></thead>
     <tbody>
-    {% for c in sec.criteria %}
-      {% set v = evaluation.verdicts.get(c.id) %}
-      {% if not c.evaluable %}
+    {% for r in sec.rows %}
+      {% if not r.evaluable %}
       <tr class="row-skip">
-        <td>{{ c.num }}</td><td>{{ c.text }}</td><td>{{ weight_labels.get(c.weight_key, '') }}</td>
+        <td>{{ r.num }}</td><td>{{ r.text }}</td><td>{{ WEIGHT_LABELS.get(r.weight_key, '') }}</td>
         <td colspan="2" class="muted">не оценивается по записи</td>
       </tr>
       {% else %}
-      <tr class="row-{{ v.result if v else 'na' }}">
-        <td>{{ c.num }}</td>
-        <td>{{ c.text }}</td>
-        <td>{{ weight_labels.get(c.weight_key, '') }}</td>
-        <td><span class="verdict verdict-{{ v.result if v else 'na' }}">{{ RESULT_LABELS[v.result] if v else '—' }}</span></td>
+      <tr class="row-{{ r.result }}">
+        <td>{{ r.num }}</td>
+        <td>{{ r.text }}</td>
+        <td>{{ WEIGHT_LABELS.get(r.weight_key, '') }}</td>
+        <td><span class="verdict verdict-{{ r.result }}">{{ RESULT_LABELS[r.result] }}</span></td>
         <td>
-          {% if v and v.evidence %}<div class="quote">«{{ v.evidence }}»</div>{% endif %}
-          {% if v and v.comment %}<div class="muted small">{{ v.comment }}</div>{% endif %}
+          {% if r.evidence %}<div class="quote">«{{ r.evidence }}»</div>{% endif %}
+          {% if r.comment %}<div class="muted small">{{ r.comment }}</div>{% endif %}
         </td>
       </tr>
       {% endif %}
