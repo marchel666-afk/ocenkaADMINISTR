@@ -223,9 +223,20 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
         items = section.get("criteria") or []
         title = _text(section.get("title")) or key
         sc = scenarios.get(key)
-        if sc is not None and foreign and key != GENERAL_KEY and (key in seen_scenarios or not same(sc.title, title)):
-            key = _free_key(scenarios, f"{key}_{clinic.id}")
-            sc = None
+        if foreign and key != GENERAL_KEY and (sc is None or key in seen_scenarios or not same(sc.title, title)):
+            # тот же сценарий мог прийти раньше под другим ключом (прошлое копирование) — ищем по названию
+            match = next(
+                (
+                    x
+                    for x in sorted(scenarios.values(), key=lambda x: (not x.active, x.id or 0))
+                    if x.key not in seen_scenarios and x.key != GENERAL_KEY and same(x.title, title)
+                ),
+                None,
+            )
+            if match is not None:
+                key, sc = match.key, match
+            elif sc is not None:
+                key, sc = _free_key(scenarios, f"{key}_{clinic.id}"), None
         if sc is None:
             sc = db.Scenario(clinic_id=clinic.id, key=key)
             s.add(sc)
@@ -247,9 +258,24 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
             code = normalize_code(item["id"])
             text = _text(item["text"])
             c = criteria.get(code)
-            if c is not None and (code in seen_codes or (foreign and not same(c.text, text))):
-                code = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix)
-                c = None
+            if foreign and (c is None or code in seen_codes or not same(c.text, text)):
+                # тот же пункт мог прийти раньше под другим кодом — ищем по тексту, лучше в этом же разделе
+                match = next(
+                    (
+                        x
+                        for x in sorted(
+                            criteria.values(), key=lambda x: (x.scenario_id != sc.id, not x.active, x.id or 0)
+                        )
+                        if x.code not in seen_codes and same(x.text, text)
+                    ),
+                    None,
+                )
+                if match is not None:
+                    code, c = match.code, match
+                elif c is not None:
+                    code, c = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix), None
+            elif c is not None and code in seen_codes:
+                code, c = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix), None
             if c is None:
                 c = db.CriterionDef(clinic_id=clinic.id, code=code, text=text)
                 s.add(c)

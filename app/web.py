@@ -1,7 +1,9 @@
 """Веб-интерфейс: сборка приложения, вход, выбор клиники, общие функции шаблонов."""
 
+import base64
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -17,6 +19,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -132,6 +135,7 @@ class Ctx:
     clinic_id: int
     clinic_name: str
     clinics: list[tuple[int, str]] = field(default_factory=list)  # доступные для переключения
+    pinned: bool = True  # клиника записана в cookie (иначе выбрана по умолчанию и её надо закрепить)
 
     @property
     def is_admin(self) -> bool:
@@ -154,9 +158,13 @@ class Services:
     def render(self, request: Request, name: str, **context) -> Response:
         context.setdefault("ctx", getattr(request.state, "ctx", None))
         context.setdefault("api_key_missing", not self.settings.openrouter_api_key)
-        context.setdefault("flash", _flash_from(request, "msg"))
-        context.setdefault("flash_error", _flash_from(request, "err"))
-        return templates.TemplateResponse(request, name, context)
+        kind, text = read_flash(request)
+        context.setdefault("flash", text if kind == "msg" else "")
+        context.setdefault("flash_error", text if kind == "err" else "")
+        response = templates.TemplateResponse(request, name, context)
+        if FLASH_COOKIE in request.cookies:  # сообщение показывается один раз
+            response.delete_cookie(FLASH_COOKIE)
+        return response
 
     def set_session(self, response: Response, user_id: int, clinic_id: int | None = None) -> None:
         with self.session_factory() as s:
@@ -177,26 +185,40 @@ def to_int(value) -> int | None:
     return int(value) if re.fullmatch(r"\d{1,9}", value, re.ASCII) else None
 
 
-# Сообщения после действий передаются в адресе (?msg=…) с подписью: по чужой ссылке с ?err=… сервис
-# не покажет произвольный текст в своём оформлении. Ключ живёт до перезапуска — сообщениям этого хватает.
+# Сообщение после действия («Сохранено», ошибка) передаётся в одноразовой подписанной cookie, а не в адресе:
+# ссылкой его нельзя переслать другому человеку и показать чужой текст в оформлении сервиса.
+# Ключ живёт до перезапуска — сообщениям этого хватает.
+FLASH_COOKIE = "ocenka_flash"
 _FLASH_KEY = secrets.token_bytes(32)
 
 
-def _flash_sig(kind: str, text: str) -> str:
-    return hmac.new(_FLASH_KEY, f"{kind}:{text}".encode(), hashlib.sha256).hexdigest()[:20]
+def _flash_sig(payload: str) -> str:
+    return hmac.new(_FLASH_KEY, payload.encode(), hashlib.sha256).hexdigest()[:24]
 
 
-def _flash_from(request: Request, kind: str) -> str:
-    text = request.query_params.get(kind, "")
-    return text if text and hmac.compare_digest(request.query_params.get("fs", ""), _flash_sig(kind, text)) else ""
+def read_flash(request: Request) -> tuple[str, str]:
+    """(вид, текст) сообщения из cookie или ("", ""), если его нет или подпись не сходится."""
+    payload, _, sig = request.cookies.get(FLASH_COOKIE, "").rpartition(".")
+    if not payload or not re.fullmatch(r"[0-9a-f]{24}", sig):
+        return "", ""
+    if not hmac.compare_digest(sig.encode(), _flash_sig(payload).encode()):
+        return "", ""
+    try:
+        kind, text = json.loads(base64.urlsafe_b64decode(payload.encode()).decode("utf-8"))
+    except (ValueError, TypeError):
+        return "", ""
+    return (kind, str(text)) if kind in ("msg", "err") else ("", "")
 
 
 def redirect(url: str, msg: str = "", err: str = "") -> RedirectResponse:
+    response = RedirectResponse(url, status_code=303)
     if msg or err:
         kind, text = ("msg", msg) if msg else ("err", err)
-        sep = "&" if "?" in url else "?"
-        url += f"{sep}{kind}={quote(text)}&fs={_flash_sig(kind, text)}"
-    return RedirectResponse(url, status_code=303)
+        payload = base64.urlsafe_b64encode(json.dumps([kind, text[:800]], ensure_ascii=False).encode()).decode()
+        response.set_cookie(
+            FLASH_COOKIE, f"{payload}.{_flash_sig(payload)}", max_age=120, httponly=True, samesite="lax"
+        )
+    return response
 
 
 def ctx_of(request: Request) -> Ctx:
@@ -227,12 +249,27 @@ def resolve_ctx(svc: Services, token: str | None) -> Ctx | None:
             clinic_id=current.id,
             clinic_name=current.name,
             clinics=[(c.id, c.name) for c in clinics],
+            pinned=current.id == wanted,
         )
+
+
+def default_clinic_id(s, user: db.User) -> int | None:
+    """Клиника, которая открывается при входе: у руководителя — своя, у администратора сети — первая работающая."""
+    if user.role == db.ADMIN:
+        return s.scalar(select(db.Clinic.id).where(db.Clinic.active.is_(True)).order_by(db.Clinic.name).limit(1))
+    return user.clinic_id
 
 
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # действия, не относящиеся к выбранной клинике: их не проверяем на «вкладку от другой клиники»
 CLINIC_FREE_PREFIXES = ("/switch-clinic", "/logout", "/login", "/setup", "/account", "/admin/")
+
+
+SESSION_ENDING_PATHS = ("/logout", "/account/logout-all")
+
+
+def _sets_session(response: Response) -> bool:
+    return any(h.startswith(COOKIE_NAME + "=") for h in response.headers.getlist("set-cookie"))
 
 
 def same_origin(request: Request) -> bool:
@@ -342,9 +379,14 @@ def create_app(
                 err=f"Страница была открыта для другой клиники, а сейчас выбрана «{ctx.clinic_name}». "
                 "Проверьте, что всё верно, и повторите действие.",
             )
-        return await call_next(request)
+        response = await call_next(request)
+        # клиника, выбранная по умолчанию, закрепляется в cookie: иначе после переименования или добавления
+        # клиник «первая» клиника сменится сама, и работа незаметно продолжится в другой клинике
+        if not ctx.pinned and path not in SESSION_ENDING_PATHS and not _sets_session(response):
+            await run_in_threadpool(svc.set_session, response, ctx.user_id, ctx.clinic_id)
+        return response
 
-    ERROR_TITLES = {403: "Нет доступа", 404: "Не найдено", 405: "Действие недоступно", 422: "Неверные данные"}
+    ERROR_TITLES = {403: "Нет доступа", 404: "Не найдено", 405: "Действие недоступно", 409: "Конфликт", 422: "Неверные данные"}
     DEFAULT_DETAILS = {"Not Found", "Forbidden", "Method Not Allowed"}
 
     def error_response(request: Request, status: int, detail: str = ""):
@@ -352,9 +394,10 @@ def create_app(
             detail = {
                 403: "Этот раздел вам недоступен.",
                 404: "Такой страницы или записи нет — возможно, её удалили.",
+                409: "Эти данные одновременно изменили в другом окне. Обновите страницу и повторите действие.",
                 422: "В запросе неверные данные. Обновите страницу и попробуйте ещё раз.",
             }.get(status, "Не удалось выполнить действие.")
-        if request.method in UNSAFE_METHODS and status in (404, 422) and getattr(request.state, "ctx", None):
+        if request.method in UNSAFE_METHODS and status in (404, 409, 422) and getattr(request.state, "ctx", None):
             return redirect(back_url(request), err=detail)  # например, повторное «Удалить» по уже удалённой записи
         if "text/html" in request.headers.get("accept", ""):
             page = svc.render(request, "error.html", title=ERROR_TITLES.get(status, "Ошибка"), message=detail)
@@ -369,6 +412,11 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError):
         return error_response(request, 422)
+
+    @app.exception_handler(IntegrityError)  # например, двойное нажатие «Добавить» в двух окнах сразу
+    async def integrity_error(request: Request, exc: IntegrityError):
+        log.warning("Конфликт записи: %s", exc)
+        return error_response(request, 409)
 
     @app.exception_handler(OverflowError)  # огромный номер в адресе (/calls/99999999999999999999)
     async def overflow_error(request: Request, exc: OverflowError):

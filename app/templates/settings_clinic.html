@@ -48,7 +48,7 @@
   </form>
 
   <div class="btn-row">
-    <form method="post" action="/settings/mango/test"><button class="btn" type="submit" {% if not scheduler_enabled %}disabled{% endif %}>Проверить подключение</button></form>
+    <form method="post" action="/settings/mango/test"><button class="btn" type="submit" {% if not scheduler_enabled %}disabled data-keep-disabled{% endif %}>Проверить подключение</button></form>
     <form class="inline-form" method="post" action="/settings/mango/import">
       <select name="days">
         <option value="0">новые звонки</option>
@@ -56,7 +56,7 @@
         <option value="3">за 3 дня</option>
         <option value="7">за неделю</option>
       </select>
-      <button class="btn" type="submit" {% if not scheduler_enabled or running %}disabled{% endif %}>Загрузить сейчас</button>
+      <button class="btn" type="submit" {% if not scheduler_enabled or running %}disabled data-keep-disabled{% endif %}>Загрузить сейчас</button>
     </form>
   </div>
   <dl class="meta">

@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 
 from . import db
 from .auth import COOKIE_NAME, hash_password, verify_password
-from .web import Services, ctx_of, redirect
+from .web import Services, ctx_of, default_clinic_id, redirect
 
 MIN_PASSWORD = 6
 MAX_FAILURES = 5  # неудачных входов подряд на один логин с одного адреса
@@ -20,7 +20,11 @@ _DUMMY_HASH = hash_password("timing-equalizer")  # чтобы ответ для 
 
 
 class LoginThrottle:
-    """Ограничение подбора пароля: после серии неудачных входов вход с этого адреса временно закрыт."""
+    """Ограничение подбора пароля: после серии неудачных попыток проверка пароля временно закрыта.
+
+    Попытка учитывается как неудачная сразу, до проверки пароля, и снимается при успехе — так
+    одновременные запросы не проскочат лимит, пока идёт медленная проверка пароля.
+    """
 
     def __init__(self) -> None:
         self._failures: dict[tuple, list[float]] = {}
@@ -34,25 +38,33 @@ class LoginThrottle:
             self._failures.pop(key, None)
         return items
 
-    def blocked_for(self, ip: str, username: str) -> int:
-        """Сколько секунд ещё закрыт вход (0 — можно)."""
+    def try_begin(self, limits: list[tuple[tuple, int]]) -> int:
+        """Резервирует попытку по всем ключам. Возвращает, сколько секунд ещё ждать (0 — можно пробовать)."""
         now = time.monotonic()
         with self._lock:
-            for key, limit in (((ip, username), MAX_FAILURES), ((ip,), MAX_FAILURES_PER_IP)):
+            for key, limit in limits:
                 items = self._recent(key, now)
                 if len(items) >= limit:
                     return int(LOCK_SECONDS - (now - items[-limit])) + 1
+            for key, _ in limits:
+                self._failures.setdefault(key, []).append(now)
         return 0
 
-    def failed(self, ip: str, username: str) -> None:
-        now = time.monotonic()
+    def succeeded(self, reset: tuple, release: tuple | None = None) -> None:
+        """Успех: счётчик reset обнуляется, у общего счётчика release снимается резерв этой попытки."""
         with self._lock:
-            for key in ((ip, username), (ip,)):
-                self._failures.setdefault(key, []).append(now)
+            self._failures.pop(reset, None)
+            items = self._failures.get(release) if release else None
+            if items:
+                items.pop()
 
-    def succeeded(self, ip: str, username: str) -> None:
-        with self._lock:
-            self._failures.pop((ip, username), None)
+
+def login_limits(ip: str, username: str) -> list[tuple[tuple, int]]:
+    return [((ip, username), MAX_FAILURES), ((ip,), MAX_FAILURES_PER_IP)]
+
+
+def _wait_text(wait: int) -> str:
+    return f"Слишком много неудачных попыток. Попробуйте через {wait // 60 + 1} мин."
 
 
 def _safe_next(url: str) -> str:
@@ -82,21 +94,15 @@ def register(app: FastAPI, svc: Services) -> None:
     ):
         ip = request.client.host if request.client else ""
         login_name = username.strip().casefold()
-        wait = throttle.blocked_for(ip, login_name)
+        wait = throttle.try_begin(login_limits(ip, login_name))
         if wait:
-            return svc.render(
-                request,
-                "login.html",
-                next=_safe_next(next),
-                error=f"Слишком много неудачных попыток входа. Попробуйте через {wait // 60 + 1} мин.",
-            )
+            return svc.render(request, "login.html", next=_safe_next(next), error=_wait_text(wait))
         with svc.session_factory() as s:
             user = s.scalars(select(db.User).where(db.User.username == username.strip())).first()
             ok = verify_password(password, user.password_hash if user else _DUMMY_HASH)
             if not (ok and user is not None and user.active):
-                throttle.failed(ip, login_name)
                 return svc.render(request, "login.html", next=_safe_next(next), error="Неверный логин или пароль")
-            throttle.succeeded(ip, login_name)
+            throttle.succeeded((ip, login_name), release=(ip,))
             if user.role != db.ADMIN and (user.clinic is None or not user.clinic.active):
                 return svc.render(
                     request,
@@ -105,7 +111,7 @@ def register(app: FastAPI, svc: Services) -> None:
                     error="Клиника, к которой привязана ваша учётная запись, отключена. Обратитесь к администратору сети.",
                 )
             response = redirect(_safe_next(next))
-            svc.set_session(response, user.id)
+            svc.set_session(response, user.id, default_clinic_id(s, user))
             return response
 
     @app.post("/logout")
@@ -156,7 +162,7 @@ def register(app: FastAPI, svc: Services) -> None:
             s.add(user)
             s.commit()
             response = redirect("/calls", msg="Администратор создан. Добро пожаловать!")
-            svc.set_session(response, user.id)
+            svc.set_session(response, user.id, default_clinic_id(s, user))
             return response
 
     @app.post("/switch-clinic")
@@ -183,10 +189,17 @@ def register(app: FastAPI, svc: Services) -> None:
         new_password2: Annotated[str, Form()],
     ):
         ctx = ctx_of(request)
+        # проверку текущего пароля ограничиваем так же, как вход: иначе по чужой открытой сессии
+        # пароль можно подбирать без ограничений
+        limits = [(("account", ctx.user_id), MAX_FAILURES)]
+        wait = throttle.try_begin(limits)
+        if wait:
+            return redirect("/account", err=_wait_text(wait))
         with svc.session_factory() as s:
             user = s.get(db.User, ctx.user_id)
             if not verify_password(old_password, user.password_hash):
                 return redirect("/account", err="Текущий пароль указан неверно")
+            throttle.succeeded(("account", ctx.user_id))
             if len(new_password) < MIN_PASSWORD:
                 return redirect("/account", err=f"Новый пароль — не короче {MIN_PASSWORD} символов")
             if new_password != new_password2:

@@ -15,4 +15,16 @@ document.addEventListener("submit", function (event) {
     url.searchParams.set("_clinic", clinic);
     form.setAttribute("action", url.pathname + url.search);
   }
+  // Защита от двойного нажатия: кнопки выключаются, когда форма уже отправляется.
+  var buttons = form.querySelectorAll("button[type=submit], button:not([type]), input[type=submit]");
+  window.setTimeout(function () {
+    buttons.forEach(function (b) { b.disabled = true; });
+  }, 0);
+});
+
+// Вернулись на страницу кнопкой «Назад» — кнопки снова доступны.
+window.addEventListener("pageshow", function () {
+  document.querySelectorAll("button[disabled][type=submit], button[disabled]:not([type])").forEach(function (b) {
+    if (!b.hasAttribute("data-keep-disabled")) b.disabled = false;
+  });
 });

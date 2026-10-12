@@ -6,7 +6,7 @@ import logging
 import threading
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session, sessionmaker
 
 from . import db
@@ -84,28 +84,56 @@ class Processor:
             )
             s.commit()
 
+    def _add_usage(self, call_id: int, usage: Usage) -> None:
+        """Расход на ИИ прогона, результат которого не сохранился (ошибка или звонок изменили): деньги уже
+        потрачены, поэтому прибавляем их к звонку в любом статусе."""
+        tokens = usage.prompt_tokens + usage.completion_tokens
+        if not tokens and not usage.cost_usd:
+            return
+        with self.session_factory() as s:
+            s.execute(
+                update(db.Call)
+                .where(db.Call.id == call_id)
+                .values(
+                    llm_tokens=func.coalesce(db.Call.llm_tokens, 0) + tokens,
+                    llm_cost_usd=func.coalesce(db.Call.llm_cost_usd, 0.0) + usage.cost_usd,
+                ),
+                execution_options={"synchronize_session": False},
+            )
+            s.commit()
+
     def process(self, call_id: int) -> None:
+        usage = Usage()
         try:
-            self._process(call_id)
+            self._process(call_id, usage)
         except Superseded:
             log.info("Звонок %s изменили во время обработки — результат отброшен", call_id)
+            self._safe(self._add_usage, call_id, usage)
         except Exception as e:  # ошибку показываем в карточке звонка, очередь продолжает работу
             log.exception("Ошибка обработки звонка %s", call_id)
-            try:
-                self._set_status(call_id, db.ERROR, f"{type(e).__name__}: {e}")
-            except Exception:
-                log.exception("Не удалось записать ошибку звонка %s", call_id)
+            self._safe(self._add_usage, call_id, usage)
+            self._safe(self._set_status, call_id, db.ERROR, f"{type(e).__name__}: {e}")
 
-    def _process(self, call_id: int) -> None:
-        # 1. берём звонок из очереди
+    @staticmethod
+    def _safe(fn, call_id: int, *args) -> None:
+        try:
+            fn(call_id, *args)
+        except Exception:
+            log.exception("Не удалось записать итог обработки звонка %s", call_id)
+
+    def _process(self, call_id: int, usage: Usage) -> None:
+        # 1. берём звонок из очереди: сначала блокировка, потом чтение — данные звонка читаются уже
+        # под блокировкой, и правка пользователя не проскочит между чтением и захватом
         with self.session_factory() as s:
-            call = s.get(db.Call, call_id)
-            if call is None:
-                return
+            _claim(s, call_id, db.QUEUED, status=db.TRANSCRIBING, status_message="")
+            call = s.get(db.Call, call_id, populate_existing=True)
             need_transcript = call.transcript_json is None
             if need_transcript and not call.audio_path:
-                raise RuntimeError("У звонка нет ни записи, ни расшифровки")
-            _claim(s, call_id, db.QUEUED, status=db.TRANSCRIBING if need_transcript else db.EVALUATING, status_message="")
+                call.status, call.status_message = db.ERROR, "У звонка нет ни записи, ни расшифровки"
+                s.commit()
+                return
+            if not need_transcript:
+                call.status = db.EVALUATING
             s.commit()
             audio_path = self.settings.audio_dir / call.audio_path if call.audio_path else None
             transcript_json = call.transcript_json
@@ -114,10 +142,17 @@ class Processor:
         if need_transcript:
             transcript = self.transcriber.transcribe(audio_path)
             with self.session_factory() as s:
-                values = {"status": db.EVALUATING, "transcript_json": transcript.to_json()}
+                # расшифровку сохраняем, даже если за это время звонок вернули в очередь (сменили тип,
+                # нажали «Переоценить»): запись та же, второй раз расшифровывать её незачем
+                values = {"transcript_json": transcript.to_json()}
                 if transcript.duration:
                     values["duration_sec"] = transcript.duration
-                _claim(s, call_id, db.TRANSCRIBING, **values)
+                s.execute(
+                    update(db.Call).where(db.Call.id == call_id, db.Call.transcript_json.is_(None)).values(**values),
+                    execution_options={"synchronize_session": False},
+                )
+                s.commit()
+                _claim(s, call_id, db.TRANSCRIBING, status=db.EVALUATING)
                 s.commit()
         else:
             transcript = Transcript.from_json(transcript_json)
@@ -144,7 +179,6 @@ class Processor:
 
         # 4. запросы к ИИ — без транзакции. При ручном типе классификация нужна, только если неизвестно,
         # где реплики администратора (запись «в одну дорожку»), или кто администратор.
-        usage = Usage()
         evaluator = Evaluator(checklists, self.llm, self.settings.llm_classify_model, self.settings.llm_model)
         if manual_type is None:
             cls = evaluator.classify(transcript, direction, started_at, usage)
@@ -270,19 +304,18 @@ class Worker(threading.Thread):
         self._wake.set()
 
     def _next_call_id(self) -> int | None:
-        """Следующий звонок: сначала загруженные вручную, затем по очереди из каждой клиники
-        (большая загрузка из Mango одной клиники не задерживает остальные). Звонки отключённых клиник ждут."""
+        """Следующий звонок: клиники по очереди (большая загрузка одной клиники не задерживает остальные),
+        внутри клиники — сначала загруженные вручную, затем из Mango. Звонки отключённых клиник ждут."""
         with self.processor.session_factory() as s:
             queued = (
                 select(db.Call.id, db.Call.clinic_id)
                 .join(db.Clinic, db.Clinic.id == db.Call.clinic_id)
                 .where(db.Call.status == db.QUEUED, db.Clinic.active.is_(True))
             )
-            row = s.execute(queued.where(db.Call.source != "mango").order_by(db.Call.id).limit(1)).first()
+            order = (db.Call.clinic_id, case((db.Call.source == "mango", 1), else_=0), db.Call.id)
+            row = s.execute(queued.where(db.Call.clinic_id > self._last_clinic).order_by(*order).limit(1)).first()
             if row is None:
-                row = s.execute(
-                    queued.where(db.Call.clinic_id > self._last_clinic).order_by(db.Call.clinic_id, db.Call.id).limit(1)
-                ).first() or s.execute(queued.order_by(db.Call.clinic_id, db.Call.id).limit(1)).first()
+                row = s.execute(queued.order_by(*order).limit(1)).first()
             if row is None:
                 return None
             self._last_clinic = row.clinic_id

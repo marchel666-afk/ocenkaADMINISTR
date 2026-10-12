@@ -11,6 +11,7 @@ import yaml
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from . import db
 from .checklists import (
@@ -152,7 +153,11 @@ def register(app: FastAPI, svc: Services) -> None:
                 position=max((x.position for x in existing), default=0) + 1,
             )
             s.add(sc)
-            s.commit()
+            try:
+                s.commit()
+            except IntegrityError:  # тот же сценарий только что добавили из другой вкладки
+                s.rollback()
+                return redirect(CHECKLIST_URL, err="Сценарий уже добавляется в другом окне — обновите страницу")
             return redirect(section_url(sc.id), msg="Сценарий добавлен. Теперь добавьте в него пункты.")
 
     @app.post(CHECKLIST_URL + "/sections/{scenario_id}")
@@ -224,21 +229,25 @@ def register(app: FastAPI, svc: Services) -> None:
         fields, error = _criterion_fields(num, text, weight, evaluable, hint)
         if error:
             return redirect(section_url(scenario_id), err=error)
-        with sf() as s:
-            sc = own_scenario(s, ctx.clinic_id, scenario_id)
-            existing = active_criteria(s, sc.id)
-            if not fields["num"]:
-                fields["num"] = str(len(existing) + 1)
-            c = db.CriterionDef(
-                clinic_id=ctx.clinic_id,
-                scenario_id=sc.id,
-                code=next_criterion_code(s, ctx.clinic_id, sc.prefix or "C"),
-                position=max((x.position for x in existing), default=-1) + 1,
-                **fields,
-            )
-            s.add(c)
-            s.commit()
-            return redirect(section_url(scenario_id), msg=f"Пункт {c.code} добавлен")
+        for _attempt in range(3):  # код занят одновременным запросом (две вкладки) — берём следующий
+            with sf() as s:
+                sc = own_scenario(s, ctx.clinic_id, scenario_id)
+                existing = active_criteria(s, sc.id)
+                c = db.CriterionDef(
+                    clinic_id=ctx.clinic_id,
+                    scenario_id=sc.id,
+                    code=next_criterion_code(s, ctx.clinic_id, sc.prefix or "C"),
+                    position=max((x.position for x in existing), default=-1) + 1,
+                    **{**fields, "num": fields["num"] or str(len(existing) + 1)},
+                )
+                s.add(c)
+                try:
+                    s.commit()
+                except IntegrityError:
+                    s.rollback()
+                    continue
+                return redirect(section_url(scenario_id), msg=f"Пункт {c.code} добавлен")
+        return redirect(section_url(scenario_id), err="Не удалось добавить пункт — повторите")
 
     @app.post(CHECKLIST_URL + "/criteria/{criterion_id}")
     def criterion_update(
@@ -327,7 +336,11 @@ def register(app: FastAPI, svc: Services) -> None:
         if not ctx.is_admin or source_clinic_id not in {cid for cid, _ in ctx.clinics}:
             return redirect(CHECKLIST_URL, err="Нет доступа к этой клинике")
         with sf() as s:
-            copy_checklist(s, s.get(db.Clinic, source_clinic_id), s.get(db.Clinic, ctx.clinic_id))
+            try:
+                copy_checklist(s, s.get(db.Clinic, source_clinic_id), s.get(db.Clinic, ctx.clinic_id))
+            except ValueError as e:  # например, в клинике-источнике остались коды старого формата
+                s.rollback()
+                return redirect(CHECKLIST_URL, err=f"Не удалось скопировать чек-лист: {e}")
             s.commit()
         return redirect(CHECKLIST_URL, msg="Чек-лист скопирован из другой клиники")
 

@@ -10,6 +10,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import flag_modified
 
 from . import db
 from .checklists import GENERAL_KEY, NOT_TARGET, ChecklistSet, load_clinic_checklists
@@ -236,7 +237,8 @@ def register(app: FastAPI, svc: Services) -> None:
                 count += 1
             s.commit()
         svc.wake_worker()
-        skipped = f" Пропущены файлы неподходящего формата: {', '.join(rejected[:5])}{' и др.' if len(rejected) > 5 else ''}." if rejected else ""
+        names = ", ".join(n if len(n) <= 40 else n[:37] + "…" for n in rejected[:5])
+        skipped = f" Пропущены файлы неподходящего формата: {names}{' и др.' if len(rejected) > 5 else ''}." if rejected else ""
         if not count:
             return redirect("/calls", err=f"Нет файлов для загрузки.{skipped}")
         return redirect("/calls", msg=f"Загружено файлов: {count}. Они обрабатываются по очереди.{skipped}")
@@ -285,6 +287,9 @@ def register(app: FastAPI, svc: Services) -> None:
         # а при сбое переоценки звонок остаётся со старым типом и старой оценкой
         call.status = db.QUEUED
         call.status_message = ""
+        # статус пишем всегда, даже если он уже «в очереди»: если обработчик успел взять звонок, пока шёл
+        # этот запрос, его результат будет отброшен, и звонок обработается заново с правками пользователя
+        flag_modified(call, "status")
         s.commit()
 
     @app.post("/calls/{call_id}/update")

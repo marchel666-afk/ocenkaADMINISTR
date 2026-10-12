@@ -9,7 +9,7 @@ from . import db
 from .auth import hash_password
 from .checklists import copy_checklist, import_checklist_data, read_template
 from .routes_auth import MIN_PASSWORD
-from .web import Services, ctx_of, redirect, to_int
+from .web import Services, ctx_of, default_clinic_id, redirect, to_int
 
 
 def register(app: FastAPI, svc: Services) -> None:
@@ -52,10 +52,14 @@ def register(app: FastAPI, svc: Services) -> None:
             s.add(clinic)
             s.flush()
             source = s.get(db.Clinic, to_int(copy_from)) if to_int(copy_from) is not None else None
-            if source is not None:
-                copy_checklist(s, source, clinic)  # сведения о клинике для ИИ не копируются — у каждой свои
-            else:
-                import_checklist_data(s, clinic, read_template(svc.settings.checklists_path))
+            try:
+                if source is not None:
+                    copy_checklist(s, source, clinic)  # сведения о клинике для ИИ не копируются — у каждой свои
+                else:
+                    import_checklist_data(s, clinic, read_template(svc.settings.checklists_path))
+            except ValueError as e:
+                s.rollback()
+                return redirect("/admin/clinics", err=f"Не удалось скопировать критерии: {e}")
             s.commit()
             response = redirect("/settings/clinic", msg=f"Клиника «{name}» создана. Заполните сведения о ней для ИИ.")
             svc.set_session(response, ctx.user_id, clinic.id)
@@ -76,8 +80,9 @@ def register(app: FastAPI, svc: Services) -> None:
             s.commit()
             state = "включена" if clinic.active else "отключена"
         response = redirect("/admin/clinics", msg=f"Клиника {state}")
-        if clinic_id == ctx.clinic_id:
-            svc.set_session(response, ctx.user_id, None)
+        if clinic_id == ctx.clinic_id and state == "отключена":
+            with sf() as s:
+                svc.set_session(response, ctx.user_id, default_clinic_id(s, s.get(db.User, ctx.user_id)))
         return response
 
     # ------------------------------------------------------------ пользователи
@@ -152,7 +157,12 @@ def register(app: FastAPI, svc: Services) -> None:
                 user.password_hash = hash_password(password)
                 changed = True
             user.role, user.clinic_id, user.active = role, cid, bool(active)
-            if changed and user.id != ctx.user_id:  # пользователю придётся войти заново с новыми правами
+            is_self = user.id == ctx.user_id
+            # пользователю придётся войти заново; себе — только при смене пароля (другие входы закрываются)
+            if changed and (not is_self or password):
                 user.session_version = (user.session_version or 0) + 1
             s.commit()
-            return redirect("/admin/users", msg=f"Пользователь {user.username} сохранён")
+            response = redirect("/admin/users", msg=f"Пользователь {user.username} сохранён")
+        if is_self and password:  # текущий вход продолжает работать
+            svc.set_session(response, ctx.user_id, ctx.clinic_id)
+        return response
