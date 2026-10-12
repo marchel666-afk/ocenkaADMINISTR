@@ -6,6 +6,7 @@ import threading
 import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import event, select
+from sqlalchemy import text as text_sql
 
 from app import db, routes_auth, routes_settings
 from app.checklists import load_clinic_checklists
@@ -474,3 +475,54 @@ def test_moved_item_keeps_code_on_recopy(settings):
     admin.post(f"/settings/checklist/sections/{incoming.id}", data={"title": "Входящий (Б)", "direction": "in"})
     admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
     assert criterion(app, clinic_b, code).active  # пункт с историей не заменён новым кодом
+
+
+# ---------------------------------------------------------------- пятый круг проверки
+
+
+def test_item_moved_in_source_survives_copy_round_trip(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    a = app.state.first_clinic_id
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    in07 = criterion(app, a, "IN07")
+    admin.post(f"/settings/checklist/criteria/{in07.id}/delete")  # «перенос»: удалили и добавили в другой раздел
+    with app.state.session_factory() as s:
+        rm = s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == a, db.Scenario.key == "out_reminder")).one()
+    admin.post("/settings/checklist/criteria", data={"scenario_id": rm.id, "text": in07.text, "weight": "medium", "evaluable": "1"})
+    with app.state.session_factory() as s:
+        moved = s.scalars(select(db.CriterionDef.code).where(db.CriterionDef.clinic_id == a,
+                                                             db.CriterionDef.scenario_id == rm.id,
+                                                             db.CriterionDef.text == in07.text)).one()
+    before = placement(app, a, ["IN07", moved])
+    admin.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(clinic_b)})
+    assert placement(app, a, ["IN07", moved]) == before == {"IN07": ("incoming", False), moved: ("out_reminder", True)}
+
+
+def test_migration_waits_briefly_and_never_blocks_startup(settings, monkeypatch):
+    opts = db.Call.__table__.dialect_options["sqlite"]
+    opts["autoincrement"] = False
+    try:
+        db.make_session_factory(settings.db_url)
+    finally:
+        opts["autoincrement"] = True
+    path = settings.data_dir / "ocenka.db"
+    holder = sqlite3.connect(path, timeout=1, isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")  # другая программа держит запись
+    monkeypatch.setattr(db, "MIGRATION_BUSY_MS", 200)
+    try:
+        sf = db.make_session_factory(settings.db_url)  # запуск не падает
+        with sf() as s:
+            assert s.execute(text_sql("PRAGMA foreign_keys")).scalar() == 1
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    con = sqlite3.connect(path)
+    assert "AUTOINCREMENT" not in con.execute("SELECT sql FROM sqlite_master WHERE name='calls'").fetchone()[0]
+    con.close()
+    db.make_session_factory(settings.db_url)  # следующий запуск перестраивает таблицу
+    con = sqlite3.connect(path)
+    assert "AUTOINCREMENT" in con.execute("SELECT sql FROM sqlite_master WHERE name='calls'").fetchone()[0]
+    con.close()

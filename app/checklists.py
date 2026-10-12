@@ -245,7 +245,9 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
         code
         for _, section in sections
         for item in section.get("criteria") or []
-        if (code := normalize_code(item["id"])) in criteria and same(criteria[code].text, _text(item["text"]))
+        if (code := normalize_code(item["id"])) in criteria
+        and criteria[code].active
+        and same(criteria[code].text, _text(item["text"]))
     }
     for pos, (key, section) in enumerate(sections):
         items = section.get("criteria") or []
@@ -296,6 +298,23 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
             code = normalize_code(item["id"])
             text = _text(item["text"])
             c = criteria.get(code)
+            if foreign and c is not None and not c.active and code not in seen_codes and same(c.text, text):
+                # удалённый пункт с этим кодом не оживляем, если в разделе есть действующий с тем же текстом
+                # (пункт удалили и добавили заново, например при переносе между разделами)
+                alive = next(
+                    (
+                        x
+                        for x in sorted(criteria.values(), key=lambda x: x.id or 0)
+                        if x.active
+                        and x.scenario_id == sc.id
+                        and x.code not in seen_codes
+                        and x.code not in exact_codes
+                        and same(x.text, text)
+                    ),
+                    None,
+                )
+                if alive is not None:
+                    code, c = alive.code, alive
             if foreign and (c is None or code in seen_codes or not same(c.text, text)):
                 # тот же пункт мог прийти раньше под другим кодом — сначала ищем по тексту в этом же разделе
                 match = next(

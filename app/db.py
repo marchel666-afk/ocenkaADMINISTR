@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 from datetime import datetime
 
 from sqlalchemy import (
@@ -290,6 +291,9 @@ def make_session_factory(db_url: str) -> sessionmaker:
     return sessionmaker(engine, expire_on_commit=False)
 
 
+MIGRATION_BUSY_MS = 5000  # сколько ждать занятую базу при перестройке таблицы звонков
+
+
 def _ensure_calls_autoincrement(engine) -> None:
     """Старые базы: таблица звонков перестраивается с AUTOINCREMENT, чтобы номер удалённого звонка не
     достался новому (иначе действие из открытой карточки удалённого звонка попало бы в чужой звонок).
@@ -311,23 +315,31 @@ def _ensure_calls_autoincrement(engine) -> None:
         cur = driver.cursor()
         driver.isolation_level = None  # транзакцией управляем сами: PRAGMA foreign_keys внутри транзакции не действует
         cur.execute("PRAGMA foreign_keys=OFF")
-        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(f"PRAGMA busy_timeout={MIGRATION_BUSY_MS}")
         try:
-            cur.execute(create)
-            cur.execute(f"INSERT INTO calls_new ({columns}) SELECT {columns} FROM calls")
-            cur.execute("DROP TABLE calls")
-            cur.execute("ALTER TABLE calls_new RENAME TO calls")
-            for index in table.indexes:
-                cur.execute(str(CreateIndex(index).compile(engine)))
-            if cur.execute("PRAGMA foreign_key_check").fetchall():
-                raise RuntimeError("нарушены связи таблиц")
-            cur.execute("COMMIT")
-            log.info("Таблица звонков перестроена: номера удалённых звонков больше не используются повторно")
-        except Exception:
-            cur.execute("ROLLBACK")
-            log.warning("Не удалось перестроить таблицу звонков — работаем по-старому", exc_info=True)
+            try:
+                cur.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:  # базу держит другая программа — не мешаем запуску
+                log.warning("База занята — перестройка таблицы звонков отложена до следующего запуска", exc_info=True)
+                return
+            try:
+                cur.execute(create)
+                cur.execute(f"INSERT INTO calls_new ({columns}) SELECT {columns} FROM calls")
+                cur.execute("DROP TABLE calls")
+                cur.execute("ALTER TABLE calls_new RENAME TO calls")
+                for index in table.indexes:
+                    cur.execute(str(CreateIndex(index).compile(engine)))
+                if cur.execute("PRAGMA foreign_key_check").fetchall():
+                    raise RuntimeError("нарушены связи таблиц")
+                cur.execute("COMMIT")
+                log.info("Таблица звонков перестроена: номера удалённых звонков больше не используются повторно")
+            except Exception:
+                if driver.in_transaction:  # SQLite мог сам откатить транзакцию (диск заполнен и т. п.)
+                    cur.execute("ROLLBACK")
+                log.warning("Не удалось перестроить таблицу звонков — работаем по-старому", exc_info=True)
         finally:
             cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA busy_timeout=30000")
     finally:
         driver.isolation_level = old_isolation  # соединение вернётся в общий пул
         raw.close()
