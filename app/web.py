@@ -136,6 +136,7 @@ class Ctx:
     clinic_name: str
     clinics: list[tuple[int, str]] = field(default_factory=list)  # доступные для переключения
     session_version: int = 0  # версия сессии из проверенной cookie
+    pinned: bool = True  # клиника записана в cookie (иначе выбрана по умолчанию — её надо закрепить)
 
     @property
     def is_admin(self) -> bool:
@@ -256,6 +257,7 @@ def resolve_ctx(svc: Services, token: str | None) -> Ctx | None:
             clinic_name=current.name,
             clinics=[(c.id, c.name) for c in clinics],
             session_version=user.session_version or 0,
+            pinned=current.id == wanted,
         )
 
 
@@ -269,6 +271,13 @@ def default_clinic_id(s, user: db.User) -> int | None:
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # действия, не относящиеся к выбранной клинике: их не проверяем на «вкладку от другой клиники»
 CLINIC_FREE_PREFIXES = ("/switch-clinic", "/logout", "/login", "/setup", "/account", "/admin/")
+
+
+SESSION_ENDING_PATHS = ("/logout", "/account/logout-all")
+
+
+def _sets_session(response: Response) -> bool:
+    return any(h.startswith(COOKIE_NAME + "=") for h in response.headers.getlist("set-cookie"))
 
 
 def same_origin(request: Request) -> bool:
@@ -378,7 +387,13 @@ def create_app(
                 err=f"Страница была открыта для другой клиники, а сейчас выбрана «{ctx.clinic_name}». "
                 "Проверьте, что всё верно, и повторите действие.",
             )
-        return await call_next(request)
+        response = await call_next(request)
+        # клиника, выбранная по умолчанию (старый вход или отключённая клиника), закрепляется в cookie:
+        # иначе после переименования или добавления клиник «первая» клиника сменится сама. Cookie
+        # подписывается версией сессии из начала запроса — параллельный «выйти везде» она не отменит.
+        if not ctx.pinned and path not in SESSION_ENDING_PATHS and not _sets_session(response):
+            svc.set_session(response, ctx.user_id, ctx.clinic_id, sv=ctx.session_version)
+        return response
 
     ERROR_TITLES = {403: "Нет доступа", 404: "Не найдено", 405: "Действие недоступно", 409: "Конфликт", 422: "Неверные данные"}
     DEFAULT_DETAILS = {"Not Found", "Forbidden", "Method Not Allowed"}

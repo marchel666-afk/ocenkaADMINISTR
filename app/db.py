@@ -22,6 +22,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 log = logging.getLogger(__name__)
@@ -284,8 +285,52 @@ def make_session_factory(db_url: str) -> sessionmaker:
     engine = create_engine(db_url, connect_args=connect_args)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
+    _ensure_calls_autoincrement(engine)
     _add_unique_indexes(engine)
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def _ensure_calls_autoincrement(engine) -> None:
+    """Старые базы: таблица звонков перестраивается с AUTOINCREMENT, чтобы номер удалённого звонка не
+    достался новому (иначе действие из открытой карточки удалённого звонка попало бы в чужой звонок).
+    Выполняется один раз; при любой ошибке таблица остаётся прежней."""
+    if engine.dialect.name != "sqlite":
+        return
+    with engine.connect() as conn:
+        ddl = conn.exec_driver_sql("SELECT sql FROM sqlite_master WHERE type='table' AND name='calls'").scalar()
+        existing = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(calls)")]
+    if not ddl or "AUTOINCREMENT" in ddl.upper():
+        return
+    table = Call.__table__
+    columns = ", ".join(f'"{c.name}"' for c in table.columns if c.name in existing)
+    create = str(CreateTable(table).compile(engine)).strip().replace("CREATE TABLE calls", "CREATE TABLE calls_new", 1)
+    raw = engine.raw_connection()
+    driver = raw.driver_connection
+    old_isolation = driver.isolation_level
+    try:
+        cur = driver.cursor()
+        driver.isolation_level = None  # транзакцией управляем сами: PRAGMA foreign_keys внутри транзакции не действует
+        cur.execute("PRAGMA foreign_keys=OFF")
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            cur.execute(create)
+            cur.execute(f"INSERT INTO calls_new ({columns}) SELECT {columns} FROM calls")
+            cur.execute("DROP TABLE calls")
+            cur.execute("ALTER TABLE calls_new RENAME TO calls")
+            for index in table.indexes:
+                cur.execute(str(CreateIndex(index).compile(engine)))
+            if cur.execute("PRAGMA foreign_key_check").fetchall():
+                raise RuntimeError("нарушены связи таблиц")
+            cur.execute("COMMIT")
+            log.info("Таблица звонков перестроена: номера удалённых звонков больше не используются повторно")
+        except Exception:
+            cur.execute("ROLLBACK")
+            log.warning("Не удалось перестроить таблицу звонков — работаем по-старому", exc_info=True)
+        finally:
+            cur.execute("PRAGMA foreign_keys=ON")
+    finally:
+        driver.isolation_level = old_isolation  # соединение вернётся в общий пул
+        raw.close()
 
 
 def _add_unique_indexes(engine) -> None:

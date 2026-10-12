@@ -218,6 +218,23 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
     def same(a: str, b: str) -> bool:
         return _text(a).casefold() == _text(b).casefold()
 
+    def place(sc, cpos: int, item: dict, code: str, text: str, c) -> None:
+        if c is None:
+            c = db.CriterionDef(clinic_id=clinic.id, code=code, text=text)
+            s.add(c)
+            criteria[code] = c
+        c.scenario_id = sc.id
+        c.num = _text(item.get("num"))
+        c.text = text
+        c.weight_key = str(item.get("weight", "medium"))
+        c.evaluable = item.get("evaluable", True) is not False
+        c.hint = _text(item.get("hint"))
+        c.position = cpos
+        c.active = True
+        s.flush()
+        seen_codes.add(code)
+
+    deferred: list[tuple] = []
     sections = [(GENERAL_KEY, data["general"])] + list((data.get("scenarios") or {}).items())
     # точные совпадения (тот же ключ и название, тот же код и текст) закрепляем заранее: поиск по названию
     # или тексту для других разделов и пунктов их не заберёт
@@ -235,17 +252,24 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
         title = _text(section.get("title")) or key
         sc = scenarios.get(key)
         if foreign and key != GENERAL_KEY and (sc is None or key in seen_scenarios or not same(sc.title, title)):
-            # тот же сценарий мог прийти раньше под другим ключом (прошлое копирование) — ищем по названию
-            match = next(
+            # тот же сценарий мог прийти раньше под другим ключом (прошлое копирование) — ищем по названию;
+            # из разделов с одинаковым названием берём тот, где уже лежат пункты этого раздела
+            texts = {_text(i["text"]).casefold() for i in items}
+
+            def overlap(x) -> int:
+                return sum(1 for c in criteria.values() if c.scenario_id == x.id and _text(c.text).casefold() in texts)
+
+            match = min(
                 (
                     x
-                    for x in sorted(scenarios.values(), key=lambda x: (not x.active, x.id or 0))
+                    for x in scenarios.values()
                     if x.key not in seen_scenarios
                     and x.key not in exact_keys
                     and x.key != GENERAL_KEY
                     and same(x.title, title)
                 ),
-                None,
+                key=lambda x: (-overlap(x), not x.active, x.id or 0),
+                default=None,
             )
             if match is not None:
                 key, sc = match.key, match
@@ -273,8 +297,7 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
             text = _text(item["text"])
             c = criteria.get(code)
             if foreign and (c is None or code in seen_codes or not same(c.text, text)):
-                # тот же пункт мог прийти раньше под другим кодом — ищем по тексту только в этом же разделе:
-                # пункты (и история оценок) других разделов, в том числе удалённых, не трогаем
+                # тот же пункт мог прийти раньше под другим кодом — сначала ищем по тексту в этом же разделе
                 match = next(
                     (
                         x
@@ -286,26 +309,32 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
                     ),
                     None,
                 )
-                if match is not None:
-                    code, c = match.code, match
-                elif c is not None:
-                    code, c = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix), None
+                if match is None:  # решим после всех разделов: пункт мог переехать из другого раздела
+                    deferred.append((sc, cpos, item, code, text))
+                    continue
+                code, c = match.code, match
             elif c is not None and code in seen_codes:
                 code, c = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix), None
-            if c is None:
-                c = db.CriterionDef(clinic_id=clinic.id, code=code, text=text)
-                s.add(c)
-                criteria[code] = c
-            c.scenario_id = sc.id
-            c.num = _text(item.get("num"))
-            c.text = text
-            c.weight_key = str(item.get("weight", "medium"))
-            c.evaluable = item.get("evaluable", True) is not False
-            c.hint = _text(item.get("hint"))
-            c.position = cpos
-            c.active = True
-            s.flush()
-            seen_codes.add(code)
+            place(sc, cpos, item, code, text, c)
+
+    # Пункты, не найденные в своём разделе: берём действующий пункт с тем же текстом из любого раздела,
+    # который иначе был бы отключён (пункт перенесли в другой раздел). Удалённые пункты не оживляем.
+    for sc, cpos, item, code, text in deferred:
+        match = next(
+            (
+                x
+                for x in sorted(criteria.values(), key=lambda x: x.id or 0)
+                if x.active and x.code not in seen_codes and x.code not in exact_codes and same(x.text, text)
+            ),
+            None,
+        )
+        if match is not None:
+            code, c = match.code, match
+        elif code in criteria:
+            code, c = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix), None
+        else:
+            c = None
+        place(sc, cpos, item, code, text, c)
 
     for key, sc in scenarios.items():
         if key not in seen_scenarios:

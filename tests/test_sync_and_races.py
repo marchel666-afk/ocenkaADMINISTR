@@ -393,3 +393,84 @@ def test_new_database_never_reuses_call_ids(settings):
     upload_text(client, "c.txt")
     with app.state.session_factory() as s:
         assert s.scalars(select(db.Call.id).where(db.Call.original_filename == "c.txt")).one() == 3
+
+
+# ---------------------------------------------------------------- четвёртый круг проверки
+
+
+def test_old_database_gets_autoincrement(settings):
+    """База, созданная до AUTOINCREMENT: таблица звонков перестраивается без потери данных и связей."""
+    opts = db.Call.__table__.dialect_options["sqlite"]
+    opts["autoincrement"] = False
+    try:
+        old = db.make_session_factory(settings.db_url)
+    finally:
+        opts["autoincrement"] = True
+    with old() as s:
+        clinic = db.Clinic(name="К")
+        s.add(clinic)
+        s.flush()
+        for name in ("a.txt", "b.txt"):
+            call = db.Call(clinic_id=clinic.id, source="text", original_filename=name, status=db.DONE)
+            call.results.append(db.CriterionResult(checklist="general", criterion_id="G01", result="yes", weight=1.0))
+            s.add(call)
+        s.commit()
+    con = sqlite3.connect(settings.data_dir / "ocenka.db")
+    assert "AUTOINCREMENT" not in con.execute("SELECT sql FROM sqlite_master WHERE name='calls'").fetchone()[0]
+    con.close()
+
+    sf = db.make_session_factory(settings.db_url)  # запуск новой версии
+    con = sqlite3.connect(settings.data_dir / "ocenka.db")
+    assert "AUTOINCREMENT" in con.execute("SELECT sql FROM sqlite_master WHERE name='calls'").fetchone()[0]
+    indexes = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='calls'")}
+    assert {"ix_calls_status", "ix_calls_clinic", "ix_calls_external"} <= indexes
+    con.close()
+    with sf() as s:
+        assert [c.original_filename for c in s.scalars(select(db.Call).order_by(db.Call.id))] == ["a.txt", "b.txt"]
+        s.delete(s.get(db.Call, 2))  # результаты удаляются вместе со звонком (связь сохранилась)
+        s.commit()
+        assert s.scalar(select(db.CriterionResult.id).where(db.CriterionResult.call_id == 2)) is None
+        new = db.Call(clinic_id=s.get(db.Call, 1).clinic_id, source="text", original_filename="c.txt", status=db.QUEUED)
+        s.add(new)
+        s.commit()
+        assert new.id == 3  # номер удалённого звонка не достался новому
+        assert s.scalar(select(db.CriterionResult.call_id).where(db.CriterionResult.call_id == 1)) == 1
+
+
+def test_clinic_stays_put_for_old_cookie_and_after_disable(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    a = app.state.first_clinic_id
+    with app.state.session_factory() as s:
+        me = s.scalars(select(db.User).where(db.User.username == ADMIN_LOGIN[0])).one()
+    old_style = TestClient(app)  # вход старой версии: клиника в cookie не записана
+    old_style.cookies.set("ocenka_session", app.state.svc.signer.dumps({"uid": me.id, "clinic": None, "sv": 0}))
+    assert f'data-clinic="{a}"' in old_style.get("/calls").text
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    admin.post("/settings/clinic", data={"name": "Ясная клиника"})  # по алфавиту теперь после «Клиника Б»
+    assert f'data-clinic="{a}"' in old_style.get("/calls").text
+
+    # работавшему в Б другому администратору Б отключили: его переводит в другую клинику один раз и закрепляет
+    worker = TestClient(app)
+    login(worker, *ADMIN_LOGIN)
+    worker.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
+    admin.post(f"/admin/clinics/{clinic_b}/toggle")
+    assert f'data-clinic="{a}"' in worker.get("/calls").text
+    admin.post(f"/admin/clinics/{clinic_b}/toggle")  # Б включили снова — молча обратно не перебрасывает
+    assert f'data-clinic="{a}"' in worker.get("/calls").text
+
+
+def test_moved_item_keeps_code_on_recopy(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    a = app.state.first_clinic_id
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    in07 = criterion(app, a, "IN07")
+    admin.post(f"/settings/checklist/criteria/{in07.id}", data={"text": "Своя формулировка А", "num": "7", "weight": "medium", "evaluable": "1"})
+    admin.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    with app.state.session_factory() as s:
+        code = s.scalars(select(db.CriterionDef.code).where(db.CriterionDef.clinic_id == clinic_b,
+                                                            db.CriterionDef.text == "Своя формулировка А")).one()
+        incoming = s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == clinic_b, db.Scenario.key == "incoming")).one()
+    admin.post(f"/settings/checklist/sections/{incoming.id}", data={"title": "Входящий (Б)", "direction": "in"})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    assert criterion(app, clinic_b, code).active  # пункт с историей не заменён новым кодом
