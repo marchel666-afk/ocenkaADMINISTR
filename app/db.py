@@ -170,6 +170,7 @@ class Call(Base):
         Index("ix_calls_started", "started_at"),
         Index("ix_calls_clinic", "clinic_id"),
         Index("ix_calls_external", "clinic_id", "source", "external_id"),
+        {"sqlite_autoincrement": True},  # номера удалённых звонков не достаются новым
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

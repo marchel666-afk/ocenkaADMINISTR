@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import case, func, select, update
@@ -55,6 +56,15 @@ def _claim(s: Session, call_id: int, expected: str | tuple[str, ...], **values) 
         raise Superseded(call_id)
 
 
+@dataclass
+class _Run:
+    """Один прогон обработки звонка: расход на ИИ и время создания звонка, по которому прогон узнаёт «свой»
+    звонок (номер удалённого звонка SQLite может отдать новому)."""
+
+    usage: Usage = field(default_factory=Usage)
+    created: datetime | None = None
+
+
 class Processor:
     """Обрабатывает звонок по чек-листу и настройкам его клиники.
 
@@ -84,16 +94,17 @@ class Processor:
             )
             s.commit()
 
-    def _add_usage(self, call_id: int, usage: Usage) -> None:
+    def _add_usage(self, call_id: int, run: _Run) -> None:
         """Расход на ИИ прогона, результат которого не сохранился (ошибка или звонок изменили): деньги уже
-        потрачены, поэтому прибавляем их к звонку в любом статусе."""
+        потрачены, поэтому прибавляем их к звонку в любом статусе — но только к тому же звонку."""
+        usage = run.usage
         tokens = usage.prompt_tokens + usage.completion_tokens
-        if not tokens and not usage.cost_usd:
+        if (not tokens and not usage.cost_usd) or run.created is None:
             return
         with self.session_factory() as s:
             s.execute(
                 update(db.Call)
-                .where(db.Call.id == call_id)
+                .where(db.Call.id == call_id, db.Call.created_at == run.created)
                 .values(
                     llm_tokens=func.coalesce(db.Call.llm_tokens, 0) + tokens,
                     llm_cost_usd=func.coalesce(db.Call.llm_cost_usd, 0.0) + usage.cost_usd,
@@ -103,15 +114,15 @@ class Processor:
             s.commit()
 
     def process(self, call_id: int) -> None:
-        usage = Usage()
+        run = _Run()
         try:
-            self._process(call_id, usage)
+            self._process(call_id, run)
         except Superseded:
             log.info("Звонок %s изменили во время обработки — результат отброшен", call_id)
-            self._safe(self._add_usage, call_id, usage)
+            self._safe(self._add_usage, call_id, run)
         except Exception as e:  # ошибку показываем в карточке звонка, очередь продолжает работу
             log.exception("Ошибка обработки звонка %s", call_id)
-            self._safe(self._add_usage, call_id, usage)
+            self._safe(self._add_usage, call_id, run)
             self._safe(self._set_status, call_id, db.ERROR, f"{type(e).__name__}: {e}")
 
     @staticmethod
@@ -121,12 +132,15 @@ class Processor:
         except Exception:
             log.exception("Не удалось записать итог обработки звонка %s", call_id)
 
-    def _process(self, call_id: int, usage: Usage) -> None:
+    def _process(self, call_id: int, run: _Run) -> None:
+        usage = run.usage
         # 1. берём звонок из очереди: сначала блокировка, потом чтение — данные звонка читаются уже
         # под блокировкой, и правка пользователя не проскочит между чтением и захватом
         with self.session_factory() as s:
             _claim(s, call_id, db.QUEUED, status=db.TRANSCRIBING, status_message="")
             call = s.get(db.Call, call_id, populate_existing=True)
+            # номер удалённого звонка SQLite может отдать новому: время создания отличает «тот же» звонок
+            created = run.created = call.created_at
             need_transcript = call.transcript_json is None
             if need_transcript and not call.audio_path:
                 call.status, call.status_message = db.ERROR, "У звонка нет ни записи, ни расшифровки"
@@ -148,7 +162,9 @@ class Processor:
                 if transcript.duration:
                     values["duration_sec"] = transcript.duration
                 s.execute(
-                    update(db.Call).where(db.Call.id == call_id, db.Call.transcript_json.is_(None)).values(**values),
+                    update(db.Call)
+                    .where(db.Call.id == call_id, db.Call.created_at == created, db.Call.transcript_json.is_(None))
+                    .values(**values),
                     execution_options={"synchronize_session": False},
                 )
                 s.commit()
@@ -160,7 +176,7 @@ class Processor:
         # 3. настройки клиники и данные звонка на момент оценки
         with self.session_factory() as s:
             call = s.get(db.Call, call_id)
-            if call is None:
+            if call is None or call.created_at != created:
                 raise Superseded(call_id)
             clinic = s.get(db.Clinic, call.clinic_id)
             min_seconds = clinic.min_call_seconds if clinic.min_call_seconds is not None else self.settings.min_call_seconds
@@ -171,9 +187,9 @@ class Processor:
             employee_known = call.employee_id is not None
 
         if source != "text" and transcript.duration and transcript.duration < min_seconds:
-            return self._finish(call_id, skip_reason=f"Слишком короткий звонок (меньше {min_seconds} с)")
+            return self._finish(call_id, created, skip_reason=f"Слишком короткий звонок (меньше {min_seconds} с)")
         if transcript.is_empty:
-            return self._finish(call_id, skip_reason="В записи не распознана речь")
+            return self._finish(call_id, created, skip_reason="В записи не распознана речь")
         if manual_type and manual_type not in checklists.scenarios:
             raise RuntimeError("Выбранного вручную сценария больше нет в чек-листе клиники — выберите другой тип")
 
@@ -193,19 +209,20 @@ class Processor:
         speakers_changed = bool(cls) and apply_admin_speaker(transcript, cls.admin_speaker)
         if manual_type is None and cls.call_type == NOT_TARGET:
             return self._finish(
-                call_id, cls=cls, usage=usage, transcript=transcript if speakers_changed else None,
+                call_id, created, cls=cls, usage=usage, transcript=transcript if speakers_changed else None,
                 skip_reason=f"Нецелевой звонок: {cls.reason}",
             )
         call_type = manual_type or cls.call_type
         evaluation = evaluator.evaluate(transcript, call_type, direction, started_at, usage, model=model_override)
         self._finish(
-            call_id, cls=cls, usage=usage, transcript=transcript if speakers_changed else None,
+            call_id, created, cls=cls, usage=usage, transcript=transcript if speakers_changed else None,
             evaluation=evaluation, checklists=checklists, manual=manual_type is not None,
         )
 
     def _finish(
         self,
         call_id: int,
+        created: datetime,
         *,
         cls=None,
         usage: Usage | None = None,
@@ -219,6 +236,9 @@ class Processor:
         with self.session_factory() as s:
             _claim(s, call_id, db.EVALUATING, status=db.EVALUATING)
             call = s.get(db.Call, call_id)
+            if call.created_at != created:
+                s.rollback()
+                raise Superseded(call_id)
             if cls is not None:
                 if not manual:
                     call.call_type = cls.call_type

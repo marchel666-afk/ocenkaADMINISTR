@@ -174,7 +174,7 @@ def register(app: FastAPI, svc: Services) -> None:
         if re_call_card(target):  # карточка звонка другой клиники не откроется — возвращаемся к списку
             target = "/calls"
         response = redirect(target)
-        svc.set_session(response, ctx.user_id, clinic_id)
+        svc.set_session(response, ctx.user_id, clinic_id, sv=ctx.session_version)
         return response
 
     @app.get("/account")
@@ -205,10 +205,10 @@ def register(app: FastAPI, svc: Services) -> None:
             if new_password != new_password2:
                 return redirect("/account", err="Пароли не совпадают")
             user.password_hash = hash_password(new_password)
-            user.session_version = (user.session_version or 0) + 1  # входы на других устройствах закрываются
+            user.session_version = new_sv = (user.session_version or 0) + 1  # входы на других устройствах закрываются
             s.commit()
         response = redirect("/account", msg="Пароль изменён. На других устройствах нужно войти заново.")
-        svc.set_session(response, ctx.user_id, ctx.clinic_id)
+        svc.set_session(response, ctx.user_id, ctx.clinic_id, sv=new_sv)
         return response
 
 

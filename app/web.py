@@ -135,7 +135,7 @@ class Ctx:
     clinic_id: int
     clinic_name: str
     clinics: list[tuple[int, str]] = field(default_factory=list)  # доступные для переключения
-    pinned: bool = True  # клиника записана в cookie (иначе выбрана по умолчанию и её надо закрепить)
+    session_version: int = 0  # версия сессии из проверенной cookie
 
     @property
     def is_admin(self) -> bool:
@@ -166,10 +166,16 @@ class Services:
             response.delete_cookie(FLASH_COOKIE)
         return response
 
-    def set_session(self, response: Response, user_id: int, clinic_id: int | None = None) -> None:
-        with self.session_factory() as s:
-            user = s.get(db.User, user_id)
-            version = (user.session_version or 0) if user else 0
+    def set_session(self, response: Response, user_id: int, clinic_id: int | None = None, sv: int | None = None) -> None:
+        """Выдаёт cookie входа. sv — версия сессии: для уже вошедшего пользователя передаётся та, что проверена
+        в начале запроса (иначе параллельный запрос мог бы «оживить» вход после «Выйти на всех устройствах»);
+        без sv версия читается из базы — только для свежего входа по паролю."""
+        if sv is not None:
+            version = sv
+        else:
+            with self.session_factory() as s:
+                user = s.get(db.User, user_id)
+                version = (user.session_version or 0) if user else 0
         response.set_cookie(
             COOKIE_NAME,
             self.signer.dumps({"uid": user_id, "clinic": clinic_id, "sv": version}),
@@ -249,7 +255,7 @@ def resolve_ctx(svc: Services, token: str | None) -> Ctx | None:
             clinic_id=current.id,
             clinic_name=current.name,
             clinics=[(c.id, c.name) for c in clinics],
-            pinned=current.id == wanted,
+            session_version=user.session_version or 0,
         )
 
 
@@ -263,13 +269,6 @@ def default_clinic_id(s, user: db.User) -> int | None:
 UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # действия, не относящиеся к выбранной клинике: их не проверяем на «вкладку от другой клиники»
 CLINIC_FREE_PREFIXES = ("/switch-clinic", "/logout", "/login", "/setup", "/account", "/admin/")
-
-
-SESSION_ENDING_PATHS = ("/logout", "/account/logout-all")
-
-
-def _sets_session(response: Response) -> bool:
-    return any(h.startswith(COOKIE_NAME + "=") for h in response.headers.getlist("set-cookie"))
 
 
 def same_origin(request: Request) -> bool:
@@ -379,12 +378,7 @@ def create_app(
                 err=f"Страница была открыта для другой клиники, а сейчас выбрана «{ctx.clinic_name}». "
                 "Проверьте, что всё верно, и повторите действие.",
             )
-        response = await call_next(request)
-        # клиника, выбранная по умолчанию, закрепляется в cookie: иначе после переименования или добавления
-        # клиник «первая» клиника сменится сама, и работа незаметно продолжится в другой клинике
-        if not ctx.pinned and path not in SESSION_ENDING_PATHS and not _sets_session(response):
-            await run_in_threadpool(svc.set_session, response, ctx.user_id, ctx.clinic_id)
-        return response
+        return await call_next(request)
 
     ERROR_TITLES = {403: "Нет доступа", 404: "Не найдено", 405: "Действие недоступно", 409: "Конфликт", 422: "Неверные данные"}
     DEFAULT_DETAILS = {"Not Found", "Forbidden", "Method Not Allowed"}

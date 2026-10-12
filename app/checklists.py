@@ -219,6 +219,17 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
         return _text(a).casefold() == _text(b).casefold()
 
     sections = [(GENERAL_KEY, data["general"])] + list((data.get("scenarios") or {}).items())
+    # точные совпадения (тот же ключ и название, тот же код и текст) закрепляем заранее: поиск по названию
+    # или тексту для других разделов и пунктов их не заберёт
+    exact_keys = {
+        key for key, section in sections if key in scenarios and same(scenarios[key].title, _text(section.get("title")))
+    }
+    exact_codes = {
+        code
+        for _, section in sections
+        for item in section.get("criteria") or []
+        if (code := normalize_code(item["id"])) in criteria and same(criteria[code].text, _text(item["text"]))
+    }
     for pos, (key, section) in enumerate(sections):
         items = section.get("criteria") or []
         title = _text(section.get("title")) or key
@@ -229,7 +240,10 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
                 (
                     x
                     for x in sorted(scenarios.values(), key=lambda x: (not x.active, x.id or 0))
-                    if x.key not in seen_scenarios and x.key != GENERAL_KEY and same(x.title, title)
+                    if x.key not in seen_scenarios
+                    and x.key not in exact_keys
+                    and x.key != GENERAL_KEY
+                    and same(x.title, title)
                 ),
                 None,
             )
@@ -259,14 +273,16 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, 
             text = _text(item["text"])
             c = criteria.get(code)
             if foreign and (c is None or code in seen_codes or not same(c.text, text)):
-                # тот же пункт мог прийти раньше под другим кодом — ищем по тексту, лучше в этом же разделе
+                # тот же пункт мог прийти раньше под другим кодом — ищем по тексту только в этом же разделе:
+                # пункты (и история оценок) других разделов, в том числе удалённых, не трогаем
                 match = next(
                     (
                         x
-                        for x in sorted(
-                            criteria.values(), key=lambda x: (x.scenario_id != sc.id, not x.active, x.id or 0)
-                        )
-                        if x.code not in seen_codes and same(x.text, text)
+                        for x in sorted(criteria.values(), key=lambda x: (not x.active, x.id or 0))
+                        if x.scenario_id == sc.id
+                        and x.code not in seen_codes
+                        and x.code not in exact_codes
+                        and same(x.text, text)
                     ),
                     None,
                 )

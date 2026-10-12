@@ -261,3 +261,135 @@ def test_admin_clinic_is_pinned_after_login(settings):
     assert f'data-clinic="{a}"' in fresh.get("/calls").text
     fresh.post("/settings/clinic", data={"name": "Ясная клиника"})  # теперь по алфавиту она после «Клиника Б»
     assert f'data-clinic="{a}"' in fresh.get("/calls").text
+
+
+# ---------------------------------------------------------------- третий круг проверки
+
+
+def placement(app, clinic_id, codes):
+    with app.state.session_factory() as s:
+        rows = s.scalars(select(db.CriterionDef).where(db.CriterionDef.clinic_id == clinic_id, db.CriterionDef.code.in_(codes)))
+        keys = {sc.id: sc.key for sc in s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == clinic_id))}
+        return {c.code: (keys[c.scenario_id], c.active) for c in rows}
+
+
+def test_copy_does_not_move_items_between_sections(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    a = app.state.first_clinic_id
+    codes = ["IN23", "RQ26", "RS12", "NS12"]
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    with app.state.session_factory() as s:
+        general = s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == a, db.Scenario.key == "general")).one()
+        text = criterion(app, a, "IN23").text
+    admin.post("/settings/checklist/criteria", data={"scenario_id": general.id, "text": text, "weight": "low", "evaluable": "1"})
+    before_a, before_b = placement(app, a, codes), placement(app, clinic_b, codes)
+    admin.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    assert placement(app, clinic_b, codes) == before_b  # пункты сценариев остались на своих местах
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(clinic_b)})
+    assert placement(app, a, codes) == before_a
+
+
+def test_deleted_item_of_other_section_is_not_revived(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    a = app.state.first_clinic_id
+    for clinic in (a, clinic_b):  # в обеих клиниках удалили сценарий «неявка»
+        admin.post("/switch-clinic", data={"clinic_id": str(clinic)})
+        with app.state.session_factory() as s:
+            sc = s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == clinic, db.Scenario.key == "out_noshow")).one()
+        admin.post(f"/settings/checklist/sections/{sc.id}/delete")
+    admin.post("/switch-clinic", data={"clinic_id": str(a)})
+    with app.state.session_factory() as s:
+        rs = s.scalars(select(db.Scenario).where(db.Scenario.clinic_id == a, db.Scenario.key == "out_reschedule")).one()
+        ns01_text = criterion(app, a, "NS01").text
+    admin.post("/settings/checklist/criteria", data={"scenario_id": rs.id, "text": ns01_text, "weight": "low", "evaluable": "1"})
+    admin.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
+    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    assert placement(app, clinic_b, ["NS01"]) == {"NS01": ("out_noshow", False)}  # история неявок не переехала
+
+
+class ReuseIdTranscriber(FakeTranscriber):
+    """Во время расшифровки звонок удаляют, а новый получает тот же номер (так бывает в старых базах)."""
+
+    def __init__(self, app_holder):
+        super().__init__()
+        self.app_holder = app_holder
+
+    def transcribe(self, path):
+        if self.calls == 0:
+            app = self.app_holder["app"]
+            with app.state.session_factory() as s:
+                old = s.get(db.Call, 1)
+                clinic_id = old.clinic_id
+                s.delete(old)
+                s.commit()
+                s.add(db.Call(id=1, clinic_id=clinic_id, source="upload", audio_path=old.audio_path,
+                              original_filename="right.mp3", status=db.QUEUED))
+                s.commit()
+        return super().transcribe(path)
+
+
+def test_transcript_of_deleted_call_not_written_to_new_call_with_same_id(settings):
+    holder = {}
+    transcriber = ReuseIdTranscriber(holder)
+    app, client, _, _ = make(settings, transcriber=transcriber)
+    holder["app"] = app
+    upload_audio(client, "wrong.mp3")
+    process_all(app)
+    call = get_call(app)
+    assert call.original_filename == "right.mp3" and call.transcript_json is None and call.status == db.QUEUED
+
+
+def test_usage_of_deleted_call_not_added_to_new_call(settings):
+    holder = {}
+
+    class ReuseLLM(FakeLLM):
+        def complete(self, system_parts, user, max_tokens=None, model=None):
+            if "определи его тип" not in "\n".join(system_parts) and not holder.get("done"):
+                holder["done"] = True
+                with holder["app"].state.session_factory() as s:
+                    old = s.get(db.Call, 1)
+                    clinic_id = old.clinic_id
+                    s.delete(old)
+                    s.commit()
+                    s.add(db.Call(id=1, clinic_id=clinic_id, source="text", transcript_json=None,
+                                  original_filename="right.txt", status=db.QUEUED))
+                    s.commit()
+            return super().complete(system_parts, user, max_tokens, model)
+
+    app, client, _, _ = make(settings, llm=ReuseLLM())
+    holder["app"] = app
+    upload_text(client)
+    process_all(app)
+    call = get_call(app)
+    assert call.original_filename == "right.txt" and not call.llm_tokens
+
+
+def test_switch_clinic_does_not_revive_revoked_session(settings):
+    app, admin, clinic_b = make_two_clinics(settings)
+    other = TestClient(app)
+    login(other, *ADMIN_LOGIN)
+    svc = app.state.svc
+    real_set = svc.set_session
+
+    def logout_everywhere_meanwhile(response, user_id, clinic_id=None, sv=None):
+        other.post("/account/logout-all")  # пока запрос переключения шёл, на другом устройстве нажали «выйти везде»
+        return real_set(response, user_id, clinic_id, sv=sv)
+
+    svc.set_session = logout_everywhere_meanwhile
+    try:
+        admin.post("/switch-clinic", data={"clinic_id": str(app.state.first_clinic_id)})
+    finally:
+        svc.set_session = real_set
+    assert "/login" in str(admin.get("/calls").url)
+
+
+def test_new_database_never_reuses_call_ids(settings):
+    app, client, _, _ = make(settings)
+    upload_text(client, "a.txt")
+    upload_text(client, "b.txt")
+    client.post("/calls/2/delete")
+    upload_text(client, "c.txt")
+    with app.state.session_factory() as s:
+        assert s.scalars(select(db.Call.id).where(db.Call.original_filename == "c.txt")).one() == 3

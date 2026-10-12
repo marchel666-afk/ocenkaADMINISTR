@@ -62,7 +62,7 @@ def register(app: FastAPI, svc: Services) -> None:
                 return redirect("/admin/clinics", err=f"Не удалось скопировать критерии: {e}")
             s.commit()
             response = redirect("/settings/clinic", msg=f"Клиника «{name}» создана. Заполните сведения о ней для ИИ.")
-            svc.set_session(response, ctx.user_id, clinic.id)
+            svc.set_session(response, ctx.user_id, clinic.id, sv=ctx.session_version)
             return response
 
     @app.post("/admin/clinics/{clinic_id}/toggle")
@@ -82,7 +82,9 @@ def register(app: FastAPI, svc: Services) -> None:
         response = redirect("/admin/clinics", msg=f"Клиника {state}")
         if clinic_id == ctx.clinic_id and state == "отключена":
             with sf() as s:
-                svc.set_session(response, ctx.user_id, default_clinic_id(s, s.get(db.User, ctx.user_id)))
+                svc.set_session(
+                    response, ctx.user_id, default_clinic_id(s, s.get(db.User, ctx.user_id)), sv=ctx.session_version
+                )
         return response
 
     # ------------------------------------------------------------ пользователи
@@ -161,8 +163,9 @@ def register(app: FastAPI, svc: Services) -> None:
             # пользователю придётся войти заново; себе — только при смене пароля (другие входы закрываются)
             if changed and (not is_self or password):
                 user.session_version = (user.session_version or 0) + 1
+            new_sv = user.session_version or 0
             s.commit()
             response = redirect("/admin/users", msg=f"Пользователь {user.username} сохранён")
         if is_self and password:  # текущий вход продолжает работать
-            svc.set_session(response, ctx.user_id, ctx.clinic_id)
+            svc.set_session(response, ctx.user_id, ctx.clinic_id, sv=new_sv)
         return response
