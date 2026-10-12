@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h2>{{ title }}</h2>
+  <p>{{ message }}</p>
+  <p><a class="btn" href="/calls">К списку звонков</a></p>
+</section>
+{% endblock %}

@@ -9,7 +9,7 @@ from . import db
 from .auth import hash_password
 from .checklists import copy_checklist, import_checklist_data, read_template
 from .routes_auth import MIN_PASSWORD
-from .web import Services, ctx_of, redirect
+from .web import Services, ctx_of, redirect, to_int
 
 
 def register(app: FastAPI, svc: Services) -> None:
@@ -51,12 +51,11 @@ def register(app: FastAPI, svc: Services) -> None:
             clinic = db.Clinic(name=name, utc_offset=utc_offset)
             s.add(clinic)
             s.flush()
-            source = s.get(db.Clinic, int(copy_from)) if copy_from.isdigit() else None
+            source = s.get(db.Clinic, to_int(copy_from)) if to_int(copy_from) is not None else None
             if source is not None:
-                copy_checklist(s, source, clinic)
+                copy_checklist(s, source, clinic)  # сведения о клинике для ИИ не копируются — у каждой свои
             else:
                 import_checklist_data(s, clinic, read_template(svc.settings.checklists_path))
-                clinic.ai_context = ""  # сведения о клинике в шаблоне — про первую клинику; заполняются в настройках
             s.commit()
             response = redirect("/settings/clinic", msg=f"Клиника «{name}» создана. Заполните сведения о ней для ИИ.")
             svc.set_session(response, ctx.user_id, clinic.id)
@@ -91,13 +90,15 @@ def register(app: FastAPI, svc: Services) -> None:
             clinics = s.scalars(select(db.Clinic).order_by(db.Clinic.name)).all()
             return svc.render(request, "admin_users.html", users=users, clinics=clinics, min_password=MIN_PASSWORD)
 
-    def _role_and_clinic(s, role: str, clinic_id: str) -> tuple[str, int | None, str]:
+    def _role_and_clinic(s, role: str, clinic_id: str, current: int | None = None) -> tuple[str, int | None, str]:
         if role not in db.ROLE_LABELS:
             return "", None, "Неизвестная роль"
         if role == db.MANAGER:
-            clinic = s.get(db.Clinic, int(clinic_id)) if clinic_id.isdigit() else None
+            clinic = s.get(db.Clinic, to_int(clinic_id)) if to_int(clinic_id) is not None else None
             if clinic is None:
                 return "", None, "Руководителю клиники нужно выбрать клинику"
+            if not clinic.active and clinic.id != current:
+                return "", None, f"Клиника «{clinic.name}» отключена — выберите работающую"
             return role, clinic.id, ""
         return role, None, ""
 
@@ -139,15 +140,19 @@ def register(app: FastAPI, svc: Services) -> None:
             user = s.get(db.User, user_id)
             if user is None:
                 raise HTTPException(status_code=404)
-            role, cid, error = _role_and_clinic(s, role, clinic_id)
+            role, cid, error = _role_and_clinic(s, role, clinic_id, current=user.clinic_id)
             if error:
                 return redirect("/admin/users", err=error)
             if user.id == ctx.user_id and (role != db.ADMIN or not active):
                 return redirect("/admin/users", err="Нельзя лишить прав или отключить самого себя")
+            changed = (user.role, user.clinic_id, user.active) != (role, cid, bool(active))
             if password:
                 if len(password) < MIN_PASSWORD:
                     return redirect("/admin/users", err=f"Пароль — не короче {MIN_PASSWORD} символов")
                 user.password_hash = hash_password(password)
+                changed = True
             user.role, user.clinic_id, user.active = role, cid, bool(active)
+            if changed and user.id != ctx.user_id:  # пользователю придётся войти заново с новыми правами
+                user.session_version = (user.session_version or 0) + 1
             s.commit()
             return redirect("/admin/users", msg=f"Пользователь {user.username} сохранён")

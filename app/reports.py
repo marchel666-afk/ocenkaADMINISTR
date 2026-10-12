@@ -28,7 +28,7 @@ def call_type_title(call: db.Call, checklists: ChecklistSet) -> str:
 
 
 def period_start(days: int) -> datetime | None:
-    return datetime.now() - timedelta(days=days) if days > 0 else None
+    return datetime.now() - timedelta(days=min(days, 36_500)) if days > 0 else None
 
 
 def _call_time():
@@ -159,6 +159,14 @@ def _sheet(wb: Workbook, title: str, headers: list[str], widths: list[int], firs
     return ws
 
 
+def _append(ws, values: list) -> None:
+    """Строка таблицы; текст, начинающийся с «=», остаётся текстом — Excel не выполнит его как формулу."""
+    ws.append(values)
+    for cell in ws[ws.max_row]:
+        if cell.data_type == "f":
+            cell.data_type = "s"
+
+
 def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: datetime | None) -> bytes:
     q = (
         select(db.Call)
@@ -192,7 +200,7 @@ def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: dat
         admin = call.employee.name if call.employee else "Не указан"
         ctype = call_type_title(call, checklists)
         status = "Оценён" if call.status == db.DONE else f"Не оценивается: {call.status_message}"
-        ws_calls.append([
+        _append(ws_calls, [
             call.id, when, admin, ctype, round(call.duration_sec or 0),
             call.score_total, call.score_general, call.score_scenario, status, call.original_filename,
         ])
@@ -201,7 +209,7 @@ def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: dat
             num = r.criterion_num or (c.num if c else "")
             text = r.criterion_text or (c.text if c else "")
             weight_key = r.weight_key or (c.weight_key if c else "")
-            ws_items.append([
+            _append(ws_items, [
                 call.id, when, admin, ctype, r.criterion_id, num, text,
                 checklists.weight_labels.get(weight_key, ""),
                 RESULT_LABELS.get(r.result, r.result), r.evidence, r.comment,
@@ -216,7 +224,7 @@ def build_excel(s: Session, checklists: ChecklistSet, clinic_id: int, since: dat
         [26, 16, 10, 16, 12],
     )
     for row in employee_stats(s, clinic_id, since):
-        ws_sum.append([row.name, row.calls, row.avg_total, row.avg_general, row.avg_scenario])
+        _append(ws_sum, [row.name, row.calls, row.avg_total, row.avg_general, row.avg_scenario])
 
     buf = BytesIO()
     wb.save(buf)

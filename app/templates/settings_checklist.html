@@ -41,7 +41,7 @@
       <div class="card-head">
         <h2>{{ current.title }}</h2>
         {% if current.key != GENERAL_KEY %}
-        <form method="post" action="/settings/checklist/sections/{{ current.id }}/delete" onsubmit="return confirm('Удалить сценарий «{{ current.title }}» со всеми пунктами? Выставленные оценки сохранятся.')">
+        <form method="post" action="/settings/checklist/sections/{{ current.id }}/delete" data-confirm="Удалить сценарий «{{ current.title }}» со всеми пунктами? Выставленные оценки сохранятся.">
           <button class="btn btn-small btn-danger" type="submit">Удалить сценарий</button>
         </form>
         {% endif %}
@@ -96,7 +96,7 @@
               <button class="btn btn-primary" type="submit">Сохранить</button>
             </div>
           </form>
-          <form method="post" action="/settings/checklist/criteria/{{ c.id }}/delete" onsubmit="return confirm('Удалить пункт {{ c.code }}? Выставленные по нему оценки сохранятся.')">
+          <form method="post" action="/settings/checklist/criteria/{{ c.id }}/delete" data-confirm="Удалить пункт {{ c.code }}? Выставленные по нему оценки сохранятся.">
             <button class="btn btn-small btn-danger" type="submit">Удалить пункт</button>
           </form>
         </details>
@@ -127,7 +127,7 @@
       <p class="muted small">Итог звонка — средневзвешенный процент: пункт «Да» приносит свои баллы, «Не применимо» в расчёт не входит. Новые баллы применяются к следующим оценкам.</p>
       <form class="inline-form" method="post" action="/settings/checklist/weights">
         {% for k, label in WEIGHT_LABELS.items() %}
-        <label class="field"><span>{{ label }}</span><input type="number" name="{{ k }}" value="{{ weights[k]|weight }}" min="0" step="0.5" class="short"></label>
+        <label class="field"><span>{{ label }}</span><input type="number" name="{{ k }}" value="{{ weights[k]|weight }}" min="0" max="1000" step="0.5" required class="short"></label>
         {% endfor %}
         <button class="btn" type="submit">Сохранить баллы</button>
       </form>
@@ -138,17 +138,17 @@
       <div class="btn-row">
         <a class="btn" href="/settings/checklist/export.yaml">Выгрузить чек-лист (YAML)</a>
         <form class="inline-form" method="post" action="/settings/checklist/import" enctype="multipart/form-data"
-              onsubmit="return confirm('Заменить чек-лист клиники содержимым файла?')">
+              data-confirm="Заменить чек-лист клиники содержимым файла?">
           <input type="file" name="file" accept=".yaml,.yml" required>
           <button class="btn" type="submit">Загрузить из файла</button>
         </form>
       </div>
       <div class="btn-row">
-        <form method="post" action="/settings/checklist/reset" onsubmit="return confirm('Заменить чек-лист клиники стандартным шаблоном? Ваши правки пунктов пропадут, выставленные оценки сохранятся.')">
+        <form method="post" action="/settings/checklist/reset" data-confirm="Заменить чек-лист клиники стандартным шаблоном? Ваши правки пунктов пропадут, выставленные оценки сохранятся.">
           <button class="btn btn-danger" type="submit">Сбросить к шаблону</button>
         </form>
         {% if other_clinics %}
-        <form class="inline-form" method="post" action="/settings/checklist/copy" onsubmit="return confirm('Заменить чек-лист этой клиники чек-листом выбранной?')">
+        <form class="inline-form" method="post" action="/settings/checklist/copy" data-confirm="Заменить чек-лист этой клиники чек-листом выбранной?">
           <select name="source_clinic_id">{% for cid, cname in other_clinics %}<option value="{{ cid }}">{{ cname }}</option>{% endfor %}</select>
           <button class="btn" type="submit">Скопировать из клиники</button>
         </form>

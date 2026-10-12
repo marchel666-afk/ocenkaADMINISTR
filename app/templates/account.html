@@ -11,5 +11,10 @@
     <label class="field"><span>Новый пароль ещё раз</span><input type="password" name="new_password2" autocomplete="new-password" required></label>
     <button class="btn btn-primary" type="submit">Сменить пароль</button>
   </form>
+  <h3>Выход</h3>
+  <p class="muted small">Если вы входили с чужого компьютера или забыли выйти, закройте все входы под своим логином.</p>
+  <form method="post" action="/account/logout-all" data-confirm="Выйти на всех устройствах, включая это?">
+    <button class="btn" type="submit">Выйти на всех устройствах</button>
+  </form>
 </section>
 {% endblock %}

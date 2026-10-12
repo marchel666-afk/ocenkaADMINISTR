@@ -17,9 +17,10 @@ from .evaluation import Evaluation
 from .mango import parse_mango_filename
 from .reports import build_excel, call_type_title, criterion_stats, employee_stats, period_start
 from .transcription import Transcript, transcript_from_text
-from .web import DIRECTIONS, Services, ctx_of, guess_datetime, parse_dt, redirect
+from .web import DIRECTIONS, Services, ctx_of, guess_datetime, parse_dt, redirect, to_int
 
 TEXT_EXTENSIONS = {".txt"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".ogg", ".oga", ".opus", ".m4a", ".aac", ".flac", ".amr", ".webm", ".wma", ".mp4", ".3gp"}
 
 
 def _decode_text(raw: bytes) -> str:
@@ -32,8 +33,13 @@ def _decode_text(raw: bytes) -> str:
 
 
 def card_sections(call: db.Call, checklists: ChecklistSet) -> list[dict]:
-    """Разделы карточки звонка: пункты в том виде, в каком их оценили (с текущими «не оценивается по записи»)."""
-    order = [GENERAL_KEY, call.call_type]
+    """Разделы карточки звонка: пункты в том виде, в каком их оценили (с текущими «не оценивается по записи»).
+
+    Сценарий берётся из самих оценок, а не из типа звонка: если переоценка не удалась, карточка
+    по-прежнему показывает прошлую оценку целиком.
+    """
+    keys = {r.checklist for r in call.results} - {GENERAL_KEY}
+    order = [GENERAL_KEY] + sorted(keys, key=lambda k: (k != call.call_type, k))
     sections = []
     for key in order:
         results = [r for r in call.results if r.checklist == key]
@@ -55,10 +61,11 @@ def card_sections(call: db.Call, checklists: ChecklistSet) -> list[dict]:
                 }
             )
         if current is not None:
+            rated = {r.criterion_id.upper() for r in results}
             rows += [
                 {"num": c.num, "text": c.text, "weight_key": c.weight_key, "evaluable": False}
                 for c in current.criteria
-                if not c.evaluable
+                if not c.evaluable and c.id.upper() not in rated
             ]
         title = (current.title if current else "") or results[0].checklist_title or key
         score = call.score_general if key == GENERAL_KEY else call.score_scenario
@@ -88,8 +95,8 @@ def register(app: FastAPI, svc: Services) -> None:
             s.add(emp)
             s.flush()
             return emp.id
-        if employee_id.isdigit():
-            emp = s.get(db.Employee, int(employee_id))
+        if to_int(employee_id) is not None:
+            emp = s.get(db.Employee, to_int(employee_id))
             return emp.id if emp is not None and emp.clinic_id == clinic_id else None
         return None
 
@@ -121,14 +128,14 @@ def register(app: FastAPI, svc: Services) -> None:
                 q = q.where(func.coalesce(db.Call.started_at, db.Call.created_at) >= since)
             if employee == "none":
                 q = q.where(db.Call.employee_id.is_(None))
-            elif employee.isdigit():
-                q = q.where(db.Call.employee_id == int(employee))
+            elif to_int(employee) is not None:
+                q = q.where(db.Call.employee_id == to_int(employee))
             if status in db.STATUS_LABELS:
                 q = q.where(db.Call.status == status)
             total = s.scalar(select(func.count()).select_from(q.subquery()))
             calls = s.scalars(
                 q.order_by(func.coalesce(db.Call.started_at, db.Call.created_at).desc(), db.Call.id.desc())
-                .offset((max(page, 1) - 1) * per_page)
+                .offset((min(max(page, 1), 100_000) - 1) * per_page)
                 .limit(per_page)
             ).all()
             pending = s.scalar(
@@ -147,7 +154,7 @@ def register(app: FastAPI, svc: Services) -> None:
                 f_employee=employee,
                 f_status=status,
                 f_days=days,
-                page=max(page, 1),
+                page=min(max(page, 1), 100_000),
                 pages=max(1, -(-total // per_page)),
                 total=total,
                 pending=pending,
@@ -177,11 +184,16 @@ def register(app: FastAPI, svc: Services) -> None:
             emp_id = get_or_create_employee(s, ctx.clinic_id, employee_id, new_employee)
             shift = clinic.utc_offset - clinic.mango_utc_offset
             count = 0
+            rejected: list[str] = []
+            written: list[Path] = []
             for upload_file in files:
                 if not upload_file.filename:
                     continue
-                name = Path(upload_file.filename).name
+                name = Path(upload_file.filename).name[-200:]
                 ext = Path(name).suffix.lower()
+                if ext not in AUDIO_EXTENSIONS | TEXT_EXTENSIONS:
+                    rejected.append(name)
+                    continue
                 mango = parse_mango_filename(name, shift)
                 call = db.Call(
                     clinic_id=ctx.clinic_id,
@@ -207,18 +219,27 @@ def register(app: FastAPI, svc: Services) -> None:
                     call.source = "text"
                     call.transcript_json = transcript.to_json()
                 else:
-                    stored = f"{datetime.now():%Y%m}/{uuid.uuid4().hex}{ext or '.audio'}"
+                    stored = f"{datetime.now():%Y%m}/{uuid.uuid4().hex}{ext}"
                     target = settings.audio_dir / stored
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with open(target, "wb") as out:
-                        shutil.copyfileobj(upload_file.file, out)
+                    written.append(target)
+                    try:
+                        with open(target, "wb") as out:
+                            shutil.copyfileobj(upload_file.file, out)
+                    except BaseException:
+                        for path in written:  # пачка не сохранится — не оставляем файлы без звонков
+                            path.unlink(missing_ok=True)
+                        raise
                     call.source = "upload"
                     call.audio_path = stored
                 s.add(call)
                 count += 1
             s.commit()
         svc.wake_worker()
-        return redirect("/calls", msg=f"Загружено файлов: {count}. Они обрабатываются по очереди.")
+        skipped = f" Пропущены файлы неподходящего формата: {', '.join(rejected[:5])}{' и др.' if len(rejected) > 5 else ''}." if rejected else ""
+        if not count:
+            return redirect("/calls", err=f"Нет файлов для загрузки.{skipped}")
+        return redirect("/calls", msg=f"Загружено файлов: {count}. Они обрабатываются по очереди.{skipped}")
 
     @app.get("/calls/{call_id}")
     def call_card(request: Request, call_id: int):
@@ -238,7 +259,8 @@ def register(app: FastAPI, svc: Services) -> None:
                 sections=card_sections(call, checklists) if evaluation else [],
                 type_title=call_type_title(call, checklists),
                 scenarios=checklists.scenarios,
-                employees=employees(s, ctx.clinic_id, active_only=True),
+                # отключённый сотрудник звонка остаётся в списке, иначе сохранение формы его сотрёт
+                employees=[e for e in employees(s, ctx.clinic_id) if e.active or e.id == call.employee_id],
                 NOT_TARGET=NOT_TARGET,
                 precise_model=precise,
             )
@@ -259,8 +281,8 @@ def register(app: FastAPI, svc: Services) -> None:
         call.llm_model_override = model
         if retranscribe and call.audio_path:
             call.transcript_json = None
-        if not call.call_type_manual:
-            call.call_type = None
+        # тип звонка не сбрасываем: автоматический тип всё равно определяется заново,
+        # а при сбое переоценки звонок остаётся со старым типом и старой оценкой
         call.status = db.QUEUED
         call.status_message = ""
         s.commit()
@@ -272,6 +294,7 @@ def register(app: FastAPI, svc: Services) -> None:
         employee_id: Annotated[str, Form()] = "",
         new_employee: Annotated[str, Form()] = "",
         call_type: Annotated[str, Form()] = "",
+        direction: Annotated[str, Form()] = "keep",
         started_at: Annotated[str, Form()] = "",
         reevaluate: Annotated[str, Form()] = "",
     ):
@@ -281,14 +304,20 @@ def register(app: FastAPI, svc: Services) -> None:
             checklists = load_clinic_checklists(s, ctx.clinic_id)
             call.employee_id = get_or_create_employee(s, ctx.clinic_id, employee_id, new_employee)
             type_changed = False
-            if call_type in checklists.scenarios:
-                type_changed = call.call_type != call_type or not call.call_type_manual
+            if direction in DIRECTIONS or direction == "":
+                new_direction = direction or None
+                type_changed = new_direction != call.direction and not call.call_type_manual
+                call.direction = new_direction
+            if call.call_type_manual and call_type == call.call_type:
+                pass  # тип не меняли (в том числе удалённый из критериев сценарий)
+            elif call_type in checklists.scenarios:
+                type_changed = True
                 call.call_type, call.call_type_manual = call_type, True
                 call.direction = checklists.scenarios[call_type].direction or call.direction
             elif call_type == "auto" and call.call_type_manual:
                 call.call_type_manual, type_changed = False, True
             dt = parse_dt(started_at)
-            if dt:
+            if dt and dt != call.started_at:
                 call.started_at = dt
             if reevaluate or type_changed:
                 requeue(s, call)
@@ -333,7 +362,7 @@ def register(app: FastAPI, svc: Services) -> None:
     @app.get("/stats")
     def stats(request: Request, days: int = 30, employee: str = ""):
         ctx = ctx_of(request)
-        emp_id = int(employee) if employee.isdigit() else None
+        emp_id = to_int(employee)
         with sf() as s:
             checklists = load_clinic_checklists(s, ctx.clinic_id)
             since = period_start(days)

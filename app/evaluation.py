@@ -247,8 +247,15 @@ class Evaluator:
         raise LLMError(f"Модель вернула ответ не в формате JSON ({last_error})")
 
     def classify(
-        self, transcript: Transcript, direction: str | None, started_at: datetime | None, usage: Usage
+        self,
+        transcript: Transcript,
+        direction: str | None,
+        started_at: datetime | None,
+        usage: Usage,
+        strict: bool = True,
     ) -> Classification:
+        """Тип звонка, имя администратора и его голос. strict=False — тип выбран вручную и нужен только ради
+        остального: незнакомый тип в ответе тогда не ошибка."""
         allowed = [
             key for key, s in self.checklists.scenarios.items() if not direction or s.direction in ("", direction)
         ]
@@ -263,7 +270,7 @@ class Evaluator:
         data = self._ask_json([system], user, usage, max_tokens=2000, model=self.classify_model)
 
         call_type = str(data.get("call_type", "")).strip()
-        if call_type not in allowed and call_type != NOT_TARGET:
+        if strict and call_type not in allowed and call_type != NOT_TARGET:
             raise LLMError(f"Модель вернула неизвестный тип звонка «{call_type}»")
         admin_name = data.get("admin_name")
         admin_name = str(admin_name).strip() if admin_name and str(admin_name).lower() != "null" else None
@@ -337,8 +344,10 @@ class Evaluator:
         if invalid:
             warnings.append(f"Непонятная оценка по пунктам: {', '.join(invalid)} (учтены как «не применимо»)")
 
+        lookup = {cid.upper(): v for cid, v in verdicts.items()}  # ИИ может написать код в другом регистре
+
         def verdict_of(criterion_id) -> str | None:
-            v = verdicts.get(str(criterion_id or "").strip().upper())
+            v = lookup.get(str(criterion_id or "").strip().upper())
             return v.result if v else None
 
         # Зоны роста — только по невыполненным пунктам, самые значимые первыми.
@@ -347,7 +356,7 @@ class Evaluator:
             if isinstance(item, dict) and verdict_of(item.get("criterion_id")) == NO:
                 improvements.append(
                     Improvement(
-                        criterion_id=str(item.get("criterion_id")).strip().upper(),
+                        criterion_id=lookup[str(item.get("criterion_id")).strip().upper()].id,
                         issue=_clip(item.get("issue"), 500),
                         recommendation=_clip(item.get("recommendation"), 500),
                         example=_clip(item.get("example"), 500),

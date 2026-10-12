@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 
 from sqlalchemy import (
@@ -22,6 +23,8 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
+
+log = logging.getLogger(__name__)
 
 # Статусы обработки звонка
 QUEUED = "queued"
@@ -139,6 +142,8 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default=MANAGER)  # admin / manager
     clinic_id: Mapped[int | None] = mapped_column(ForeignKey("clinics.id"), default=None)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # растёт при смене пароля, роли, клиники и при «выйти на всех устройствах» — старые входы перестают действовать
+    session_version: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
     clinic: Mapped[Clinic | None] = relationship()
@@ -278,7 +283,21 @@ def make_session_factory(db_url: str) -> sessionmaker:
     engine = create_engine(db_url, connect_args=connect_args)
     Base.metadata.create_all(engine)
     _add_missing_columns(engine)
+    _add_unique_indexes(engine)
     return sessionmaker(engine, expire_on_commit=False)
+
+
+def _add_unique_indexes(engine) -> None:
+    """Коды пунктов и ключи сценариев уникальны в пределах клиники (защита от дублей при одновременной правке)."""
+    for name, table, columns in (
+        ("ux_criteria_code", "criteria", "clinic_id, code"),
+        ("ux_scenarios_key", "scenarios", "clinic_id, key"),
+    ):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {table} ({columns})"))
+        except Exception:  # в старой базе уже есть дубли — работаем без индекса
+            log.warning("Не удалось создать уникальный индекс %s", name, exc_info=True)
 
 
 def ensure_default_clinic(session_factory: sessionmaker, name: str, utc_offset: int = 3) -> int:

@@ -1,6 +1,7 @@
 """Настройки текущей клиники: редактор критериев оценки, сведения для ИИ, подключение к Mango."""
 
 import json
+import math
 import re
 import threading
 from datetime import datetime
@@ -22,7 +23,7 @@ from .checklists import (
     next_criterion_code,
     read_template,
 )
-from .web import Services, ctx_of, redirect
+from .web import Services, ctx_of, redirect, to_int
 
 CHECKLIST_URL = "/settings/checklist"
 
@@ -96,13 +97,17 @@ def register(app: FastAPI, svc: Services) -> None:
     @app.post(f"{CHECKLIST_URL}/weights")
     def checklist_weights(
         request: Request,
-        high: Annotated[float, Form()],
-        medium: Annotated[float, Form()],
-        low: Annotated[float, Form()],
+        high: Annotated[str, Form()] = "",
+        medium: Annotated[str, Form()] = "",
+        low: Annotated[str, Form()] = "",
     ):
         ctx = ctx_of(request)
-        if min(high, medium, low) < 0:
-            return redirect(CHECKLIST_URL, err="Баллы не могут быть отрицательными")
+        try:
+            high, medium, low = (float(x.strip().replace(",", ".")) for x in (high, medium, low))
+        except ValueError:
+            return redirect(CHECKLIST_URL, err="Баллы — числа от 0 до 1000")
+        if not all(math.isfinite(x) and 0 <= x <= 1000 for x in (high, medium, low)):
+            return redirect(CHECKLIST_URL, err="Баллы — числа от 0 до 1000")
         with sf() as s:
             clinic = s.get(db.Clinic, ctx.clinic_id)
             clinic.weights_json = json.dumps({"high": high, "medium": medium, "low": low})
@@ -132,13 +137,14 @@ def register(app: FastAPI, svc: Services) -> None:
                 prefix = next(
                     f"S{chr(c)}" for c in range(ord("A"), ord("Z") + 1) if f"S{chr(c)}" not in used_prefixes
                 )
+            # ключ уникален во всей сети: при копировании между клиниками сценарии разных клиник не совпадут
             n = 1
             used_keys = {sc.key for sc in existing}
-            while f"custom_{n}" in used_keys:
+            while f"custom_{ctx.clinic_id}_{n}" in used_keys:
                 n += 1
             sc = db.Scenario(
                 clinic_id=ctx.clinic_id,
-                key=f"custom_{n}",
+                key=f"custom_{ctx.clinic_id}_{n}",
                 title=title,
                 direction=direction,
                 description=_clean(description),
@@ -187,6 +193,8 @@ def register(app: FastAPI, svc: Services) -> None:
         ctx = ctx_of(request)
         with sf() as s:
             sc = own_scenario(s, ctx.clinic_id, scenario_id)
+            if sc.key == GENERAL_KEY:  # общие правила всегда первые
+                return redirect(section_url(scenario_id))
             ordered = [x for x in active_scenarios(s, ctx.clinic_id) if x.key != GENERAL_KEY]
             _move(ordered, sc, direction, offset=1)
             s.commit()
@@ -298,6 +306,9 @@ def register(app: FastAPI, svc: Services) -> None:
             except ValueError as e:
                 s.rollback()
                 return redirect(CHECKLIST_URL, err=str(e))
+            except (TypeError, AttributeError, KeyError) as e:
+                s.rollback()
+                return redirect(CHECKLIST_URL, err=f"Файл не похож на выгрузку чек-листа: {e}")
             s.commit()
         return redirect(CHECKLIST_URL, msg="Чек-лист загружен из файла")
 
@@ -306,7 +317,7 @@ def register(app: FastAPI, svc: Services) -> None:
         ctx = ctx_of(request)
         with sf() as s:
             clinic = s.get(db.Clinic, ctx.clinic_id)
-            import_checklist_data(s, clinic, read_template(svc.settings.checklists_path), replace_context=False)
+            import_checklist_data(s, clinic, read_template(svc.settings.checklists_path))
             s.commit()
         return redirect(CHECKLIST_URL, msg="Чек-лист заменён шаблоном")
 
@@ -353,7 +364,7 @@ def register(app: FastAPI, svc: Services) -> None:
                 clinic.name = _clean(name)
             clinic.ai_context = (ai_context or "").strip()
             clinic.utc_offset = utc_offset
-            clinic.min_call_seconds = int(min_call_seconds) if min_call_seconds.strip().isdigit() else None
+            clinic.min_call_seconds = to_int(min_call_seconds)
             s.commit()
         return redirect("/settings/clinic", msg="Настройки клиники сохранены")
 
@@ -374,13 +385,17 @@ def register(app: FastAPI, svc: Services) -> None:
                 clinic.mango_api_key = api_key.strip()
             if api_salt.strip():
                 clinic.mango_api_salt = api_salt.strip()
-            if enabled and not (clinic.mango_api_key and clinic.mango_api_salt):
-                return redirect("/settings/clinic", err="Для автозагрузки укажите уникальный код АТС и ключ подписи")
-            clinic.mango_enabled = bool(enabled)
+            keys_missing = bool(enabled) and not (clinic.mango_api_key and clinic.mango_api_salt)
+            clinic.mango_enabled = bool(enabled) and not keys_missing
             clinic.mango_interval_min = max(10, min(int(interval_min), 24 * 60))
             clinic.mango_lines = ", ".join(x for x in re.split(r"[\s,;]+", lines) if x)
             clinic.mango_utc_offset = mango_utc_offset
             s.commit()
+        if keys_missing:
+            return redirect(
+                "/settings/clinic",
+                err="Настройки сохранены, но автозагрузка не включена: укажите и уникальный код АТС, и ключ для создания подписи",
+            )
         if enabled and svc.scheduler:
             svc.scheduler.wake()
         return redirect("/settings/clinic", msg="Настройки Mango сохранены")
@@ -409,7 +424,9 @@ def register(app: FastAPI, svc: Services) -> None:
 
 def _move(items: list, item, direction: str, offset: int = 0) -> None:
     """Меняет местами элемент с соседним и переписывает позиции подряд."""
-    idx = next(i for i, x in enumerate(items) if x.id == item.id)
+    idx = next((i for i, x in enumerate(items) if x.id == item.id), None)
+    if idx is None:  # элемент отключён или в другом списке
+        return
     swap = idx - 1 if direction == "up" else idx + 1
     if 0 <= swap < len(items):
         items[idx], items[swap] = items[swap], items[idx]

@@ -129,7 +129,7 @@
       <span>Администратор</span>
       <select name="employee_id">
         <option value="">— не указан —</option>
-        {% for e in employees %}<option value="{{ e.id }}" {% if call.employee_id == e.id %}selected{% endif %}>{{ e.name }}</option>{% endfor %}
+        {% for e in employees %}<option value="{{ e.id }}" {% if call.employee_id == e.id %}selected{% endif %}>{{ e.name }}{% if not e.active %} (не работает){% endif %}</option>{% endfor %}
       </select>
     </label>
     <label class="field">
@@ -141,11 +141,19 @@
       <select name="call_type">
         <option value="auto" {% if not call.call_type_manual %}selected{% endif %}>— определить автоматически —</option>
         {% for key, sc in scenarios.items() %}<option value="{{ key }}" {% if call.call_type_manual and call.call_type == key %}selected{% endif %}>{{ sc.title }}</option>{% endfor %}
+        {% if call.call_type_manual and call.call_type and call.call_type not in scenarios %}<option value="{{ call.call_type }}" selected>{{ type_title }} (удалён из критериев)</option>{% endif %}
+      </select>
+    </label>
+    <label class="field">
+      <span>Направление</span>
+      <select name="direction">
+        <option value="" {% if not call.direction %}selected{% endif %}>— неизвестно —</option>
+        {% for key, label in DIRECTIONS.items() %}<option value="{{ key }}" {% if call.direction == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
       </select>
     </label>
     <label class="field">
       <span>Дата и время</span>
-      <input type="datetime-local" name="started_at" value="{{ call.started_at.strftime('%Y-%m-%dT%H:%M') if call.started_at else '' }}">
+      <input type="datetime-local" step="1" name="started_at" value="{{ call.started_at.strftime('%Y-%m-%dT%H:%M:%S') if call.started_at else '' }}">
     </label>
     <label class="field check"><input type="checkbox" name="reevaluate" value="1"> переоценить звонок</label>
     <div class="field actions"><button class="btn btn-primary" type="submit">Сохранить</button></div>
@@ -158,7 +166,7 @@
     {% if call.audio_path %}
     <form method="post" action="/calls/{{ call.id }}/retranscribe"><button class="btn" type="submit">Расшифровать заново</button></form>
     {% endif %}
-    <form method="post" action="/calls/{{ call.id }}/delete" onsubmit="return confirm('Удалить звонок и запись?')"><button class="btn btn-danger" type="submit">Удалить</button></form>
+    <form method="post" action="/calls/{{ call.id }}/delete" data-confirm="Удалить звонок и запись?"><button class="btn btn-danger" type="submit">Удалить</button></form>
   </div>
   {% if call.llm_tokens %}
   <p class="muted small">Модель: {{ call.llm_model or '—' }} · токенов: {{ call.llm_tokens }} · стоимость: ${{ '%.4f' % call.llm_cost_usd }}</p>

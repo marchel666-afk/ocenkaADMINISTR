@@ -1,20 +1,25 @@
 """Веб-интерфейс: сборка приложения, вход, выбор клиники, общие функции шаблонов."""
 
+import hashlib
+import hmac
 import logging
 import re
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, Request
-from fastapi.responses import RedirectResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import sessionmaker
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import db
 from .auth import COOKIE_NAME, SESSION_MAX_AGE, SessionSigner, hash_password, load_or_create_secret
@@ -149,24 +154,48 @@ class Services:
     def render(self, request: Request, name: str, **context) -> Response:
         context.setdefault("ctx", getattr(request.state, "ctx", None))
         context.setdefault("api_key_missing", not self.settings.openrouter_api_key)
-        context.setdefault("flash", request.query_params.get("msg", ""))
-        context.setdefault("flash_error", request.query_params.get("err", ""))
+        context.setdefault("flash", _flash_from(request, "msg"))
+        context.setdefault("flash_error", _flash_from(request, "err"))
         return templates.TemplateResponse(request, name, context)
 
     def set_session(self, response: Response, user_id: int, clinic_id: int | None = None) -> None:
+        with self.session_factory() as s:
+            user = s.get(db.User, user_id)
+            version = (user.session_version or 0) if user else 0
         response.set_cookie(
             COOKIE_NAME,
-            self.signer.dumps({"uid": user_id, "clinic": clinic_id}),
+            self.signer.dumps({"uid": user_id, "clinic": clinic_id, "sv": version}),
             max_age=SESSION_MAX_AGE,
             httponly=True,
             samesite="lax",
         )
 
 
+def to_int(value) -> int | None:
+    """Целое из формы или адреса: только цифры ASCII (str.isdigit пропускает «²»), без огромных чисел."""
+    value = str(value or "").strip()
+    return int(value) if re.fullmatch(r"\d{1,9}", value, re.ASCII) else None
+
+
+# Сообщения после действий передаются в адресе (?msg=…) с подписью: по чужой ссылке с ?err=… сервис
+# не покажет произвольный текст в своём оформлении. Ключ живёт до перезапуска — сообщениям этого хватает.
+_FLASH_KEY = secrets.token_bytes(32)
+
+
+def _flash_sig(kind: str, text: str) -> str:
+    return hmac.new(_FLASH_KEY, f"{kind}:{text}".encode(), hashlib.sha256).hexdigest()[:20]
+
+
+def _flash_from(request: Request, kind: str) -> str:
+    text = request.query_params.get(kind, "")
+    return text if text and hmac.compare_digest(request.query_params.get("fs", ""), _flash_sig(kind, text)) else ""
+
+
 def redirect(url: str, msg: str = "", err: str = "") -> RedirectResponse:
     if msg or err:
+        kind, text = ("msg", msg) if msg else ("err", err)
         sep = "&" if "?" in url else "?"
-        url += sep + ("msg=" + quote(msg) if msg else "err=" + quote(err))
+        url += f"{sep}{kind}={quote(text)}&fs={_flash_sig(kind, text)}"
     return RedirectResponse(url, status_code=303)
 
 
@@ -179,8 +208,8 @@ def resolve_ctx(svc: Services, token: str | None) -> Ctx | None:
     if not data:
         return None
     with svc.session_factory() as s:
-        user = s.get(db.User, int(data.get("uid") or 0))
-        if user is None or not user.active:
+        user = s.get(db.User, to_int(data.get("uid")) or 0)
+        if user is None or not user.active or (to_int(data.get("sv")) or 0) != (user.session_version or 0):
             return None
         if user.role == db.ADMIN:
             clinics = s.scalars(select(db.Clinic).where(db.Clinic.active.is_(True)).order_by(db.Clinic.name)).all()
@@ -199,6 +228,26 @@ def resolve_ctx(svc: Services, token: str | None) -> Ctx | None:
             clinic_name=current.name,
             clinics=[(c.id, c.name) for c in clinics],
         )
+
+
+UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# действия, не относящиеся к выбранной клинике: их не проверяем на «вкладку от другой клиники»
+CLINIC_FREE_PREFIXES = ("/switch-clinic", "/logout", "/login", "/setup", "/account", "/admin/")
+
+
+def same_origin(request: Request) -> bool:
+    """Защита от подделки запросов с чужих сайтов: браузер всегда сообщает, с какой страницы отправлена форма."""
+    source = request.headers.get("origin") or request.headers.get("referer")
+    if not source:
+        return True  # не браузер: скрипты и тесты
+    hosts = {request.headers.get("host", ""), request.headers.get("x-forwarded-host", "")} - {""}
+    return source != "null" and urlparse(source).netloc in hosts
+
+
+def back_url(request: Request) -> str:
+    """Страница, с которой пришла форма (только путь этого сервиса)."""
+    path = urlparse(request.headers.get("referer", "")).path
+    return path if path.startswith("/") and not path.startswith("//") else "/calls"
 
 
 def users_exist(svc: Services) -> bool:
@@ -269,6 +318,8 @@ def create_app(
         path = request.url.path
         if path.startswith("/static/"):
             return await call_next(request)
+        if request.method in UNSAFE_METHODS and not same_origin(request):
+            return Response("Запрос отправлен с другого сайта и отклонён", status_code=403)
         ctx = await run_in_threadpool(resolve_ctx, svc, request.cookies.get(COOKIE_NAME))
         request.state.ctx = ctx
         if path in PUBLIC_PATHS:
@@ -276,8 +327,52 @@ def create_app(
         if ctx is None:
             if not await run_in_threadpool(users_exist, svc):
                 return RedirectResponse("/setup", status_code=303)
-            return RedirectResponse(f"/login?next={quote(path)}", status_code=303)
+            target = path + (f"?{request.url.query}" if request.url.query and request.method == "GET" else "")
+            return RedirectResponse(f"/login?next={quote(target)}", status_code=303)
+        # форма из вкладки, открытой до переключения клиники в другой вкладке, не должна писать в чужую клинику
+        stamp = request.query_params.get("_clinic")
+        if (
+            request.method in UNSAFE_METHODS
+            and stamp is not None
+            and not path.startswith(CLINIC_FREE_PREFIXES)
+            and to_int(stamp) != ctx.clinic_id
+        ):
+            return redirect(
+                back_url(request),
+                err=f"Страница была открыта для другой клиники, а сейчас выбрана «{ctx.clinic_name}». "
+                "Проверьте, что всё верно, и повторите действие.",
+            )
         return await call_next(request)
+
+    ERROR_TITLES = {403: "Нет доступа", 404: "Не найдено", 405: "Действие недоступно", 422: "Неверные данные"}
+    DEFAULT_DETAILS = {"Not Found", "Forbidden", "Method Not Allowed"}
+
+    def error_response(request: Request, status: int, detail: str = ""):
+        if not detail or detail in DEFAULT_DETAILS:
+            detail = {
+                403: "Этот раздел вам недоступен.",
+                404: "Такой страницы или записи нет — возможно, её удалили.",
+                422: "В запросе неверные данные. Обновите страницу и попробуйте ещё раз.",
+            }.get(status, "Не удалось выполнить действие.")
+        if request.method in UNSAFE_METHODS and status in (404, 422) and getattr(request.state, "ctx", None):
+            return redirect(back_url(request), err=detail)  # например, повторное «Удалить» по уже удалённой записи
+        if "text/html" in request.headers.get("accept", ""):
+            page = svc.render(request, "error.html", title=ERROR_TITLES.get(status, "Ошибка"), message=detail)
+            page.status_code = status
+            return page
+        return JSONResponse({"detail": detail}, status_code=status)
+
+    @app.exception_handler(StarletteHTTPException)
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        return error_response(request, exc.status_code, str(exc.detail or ""))
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        return error_response(request, 422)
+
+    @app.exception_handler(OverflowError)  # огромный номер в адресе (/calls/99999999999999999999)
+    async def overflow_error(request: Request, exc: OverflowError):
+        return error_response(request, 404)
 
     from . import routes_admin, routes_auth, routes_calls, routes_settings
 

@@ -197,7 +197,8 @@ def test_custom_scenario_and_move(settings):
     r = client.post("/settings/checklist/sections",
                     data={"title": "Повторная консультация", "direction": "out", "description": "Звонок после приёма", "prefix": "pk"})
     assert "Сценарий добавлен" in r.text
-    sid = scenario_id(app, clinic, "custom_1")
+    key = f"custom_{clinic}_1"  # ключ уникален во всей сети
+    sid = scenario_id(app, clinic, key)
     client.post("/settings/checklist/criteria", data={"scenario_id": sid, "text": "Пункт один", "weight": "medium", "evaluable": "1"})
     client.post("/settings/checklist/criteria", data={"scenario_id": sid, "text": "Пункт два", "weight": "medium", "evaluable": "1"})
     assert criterion(app, clinic, "PK01").text == "Пункт один"
@@ -205,21 +206,22 @@ def test_custom_scenario_and_move(settings):
     client.post(f"/settings/checklist/criteria/{second.id}/move", data={"direction": "up"})
     with app.state.session_factory() as s:
         cl = load_clinic_checklists(s, clinic)
-    assert [c.id for c in cl.scenarios["custom_1"].criteria] == ["PK02", "PK01"]
-    assert cl.scenarios["custom_1"].direction == "out"
+    assert [c.id for c in cl.scenarios[key].criteria] == ["PK02", "PK01"]
+    assert cl.scenarios[key].direction == "out"
 
     # ИИ видит новый сценарий при выборе типа звонка, и по нему можно оценить звонок
     upload_text(client, direction="out")
-    llm.call_type = "custom_1"
+    llm.call_type = key
     process_all(app)
     classify_system = llm.requests[0][0][0]
-    assert "custom_1: Повторная консультация. Звонок после приёма" in classify_system
+    assert f"{key}: Повторная консультация. Звонок после приёма" in classify_system
     call = get_call(app)
-    assert call.status == db.DONE and call.call_type == "custom_1"
+    assert call.status == db.DONE and call.call_type == key
 
     # нельзя удалить общие правила и задать занятый код раздела
     general = scenario_id(app, clinic, "general")
     assert "удалить нельзя" in client.post(f"/settings/checklist/sections/{general}/delete").text
+    assert client.post(f"/settings/checklist/sections/{general}/move", data={"direction": "up"}).status_code == 200
     r = client.post("/settings/checklist/sections", data={"title": "x", "direction": "in", "prefix": "PK"})
     assert "не занятые" in r.text
 
@@ -269,13 +271,41 @@ def test_yaml_export_import_roundtrip(settings):
 def test_copy_checklist_between_clinics(settings):
     app, admin, clinic_b = make_two_clinics(settings)
     a = app.state.first_clinic_id
+    with app.state.session_factory() as s:
+        s.get(db.Clinic, a).ai_context = "А: ул. Лазо, 6Б"
+        s.get(db.Clinic, clinic_b).ai_context = "Б: ул. Ленина, 1"
+        s.commit()
     admin.post("/switch-clinic", data={"clinic_id": str(a)})
     g01 = criterion(app, a, "G01")
     admin.post(f"/settings/checklist/criteria/{g01.id}",
                data={"text": "Особое правило клиники А", "num": "1", "weight": "high", "evaluable": "1"})
     admin.post("/switch-clinic", data={"clinic_id": str(clinic_b)})
-    admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
-    assert criterion(app, clinic_b, "G01").text == "Особое правило клиники А"
+    r = admin.post("/settings/checklist/copy", data={"source_clinic_id": str(a)})
+    assert "скопирован" in r.text
+    with app.state.session_factory() as s:
+        cl = load_clinic_checklists(s, clinic_b)
+        assert s.get(db.Clinic, clinic_b).ai_context == "Б: ул. Ленина, 1"  # сведения о клинике у каждой свои
+    # пункт с тем же кодом, но другим смыслом стал новым пунктом, история старого G01 клиники Б не смешивается
+    copied = [c for c in cl.general.criteria if c.text == "Особое правило клиники А"]
+    assert len(copied) == 1 and copied[0].id != "G01" and cl.criterion("G01") is None
+    assert not criterion(app, clinic_b, "G01").active
+    # одинаковые пункты остаются теми же (история оценок по ним продолжается)
+    assert cl.criterion("G02").text == load_clinic_checklists_text(app, a, "G02")
+
+    # файл, выгруженный в клинике А и загруженный в Б, ведёт себя так же; свой файл — правка на месте
+    exported = admin.get("/settings/checklist/export.yaml").content.decode("utf-8")
+    data = yaml.safe_load(exported)
+    assert data["source_clinic"] == clinic_b and "clinic_context" not in data
+    data["general"]["criteria"][1]["text"] = "Правка своего пункта"
+    code = data["general"]["criteria"][1]["id"]
+    admin.post("/settings/checklist/import",
+               files=[("file", ("c.yaml", yaml.safe_dump(data, allow_unicode=True).encode(), "application/x-yaml"))])
+    assert criterion(app, clinic_b, code).text == "Правка своего пункта"
+
+
+def load_clinic_checklists_text(app, clinic_id, code):
+    with app.state.session_factory() as s:
+        return load_clinic_checklists(s, clinic_id).criterion(code).text
 
 
 def test_clinic_settings_and_ai_context(settings):

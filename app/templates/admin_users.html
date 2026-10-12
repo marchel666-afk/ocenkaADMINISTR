@@ -15,7 +15,7 @@
             <select name="role">{% for k, label in ROLE_LABELS.items() %}<option value="{{ k }}" {% if u.role == k %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
             <select name="clinic_id">
               <option value="">— клиника —</option>
-              {% for c in clinics %}<option value="{{ c.id }}" {% if u.clinic_id == c.id %}selected{% endif %}>{{ c.name }}</option>{% endfor %}
+              {% for c in clinics if c.active or u.clinic_id == c.id %}<option value="{{ c.id }}" {% if u.clinic_id == c.id %}selected{% endif %}>{{ c.name }}{% if not c.active %} (отключена){% endif %}</option>{% endfor %}
             </select>
             <input type="password" name="password" placeholder="не менять" autocomplete="new-password" class="short">
             <label class="check"><input type="checkbox" name="active" value="1" {% if u.active %}checked{% endif %}> активен</label>

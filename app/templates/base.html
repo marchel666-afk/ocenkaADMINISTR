@@ -5,9 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Оценка звонков{% endblock %}{% if ctx %} — {{ ctx.clinic_name }}{% endif %}</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
   {% block head %}{% endblock %}
 </head>
-<body>
+<body{% if ctx %} data-clinic="{{ ctx.clinic_id }}"{% endif %}>
   <header class="topbar">
     <div class="wrap topbar-inner">
       <a class="brand" href="/calls">Оценка звонков</a>

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -121,43 +123,86 @@ def read_template(path: Path) -> dict:
 
 
 def _code_prefix(code: str) -> str:
-    import re
-
-    m = re.match(r"^([A-Za-zА-Яа-я]+)", code or "")
+    m = re.match(r"^([A-Za-zА-Яа-яЁё]+)", code or "")
     return m.group(1) if m else ""
+
+
+CODE_RE = re.compile(r"^[A-ZА-ЯЁ]{1,6}\d{1,4}(_\d{1,3})?$")
+KEY_RE = re.compile(r"^[a-z0-9_]{1,50}$")
+RESERVED_KEYS = {GENERAL_KEY, "not_target"}
+
+
+def _text(value) -> str:
+    """Строка из YAML: пустое поле (None) — пустая строка, лишние пробелы убираются."""
+    return " ".join(str(value).split()) if value is not None else ""
+
+
+def normalize_code(value) -> str:
+    return _text(value).upper()
 
 
 def validate_checklist_data(data: dict) -> None:
     """Проверяет словарь чек-листа перед загрузкой. Бросает ValueError с понятным текстом."""
     if not isinstance(data, dict) or "general" not in data or "scenarios" not in data:
         raise ValueError("В файле нет разделов «general» и «scenarios»")
+    weights = data.get("weights") or {}
+    if not isinstance(weights, dict):
+        raise ValueError("Раздел «weights» должен быть списком вида high: 3, medium: 2, low: 1")
+    for key, value in weights.items():
+        if key not in WEIGHT_KEYS:
+            raise ValueError(f"Неизвестная значимость «{key}» в разделе weights: нужны high, medium, low")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            raise ValueError(f"Балл за значимость {key} должен быть неотрицательным числом")
+    scenarios = data.get("scenarios") or {}
+    if not isinstance(scenarios, dict):
+        raise ValueError("Раздел «scenarios» должен содержать сценарии в виде ключ: описание")
     codes: list[str] = []
-    sections = [("general", data["general"])] + list((data.get("scenarios") or {}).items())
-    for key, section in sections:
-        if not isinstance(section, dict) or not section.get("title"):
+    sections = [(GENERAL_KEY, data["general"])] + list(scenarios.items())
+    for i, (key, section) in enumerate(sections):
+        if i and (not isinstance(key, str) or not KEY_RE.fullmatch(key) or key in RESERVED_KEYS):
+            raise ValueError(
+                f"Ключ сценария «{key}»: только латинские строчные буквы, цифры и «_», кроме general и not_target"
+            )
+        if not isinstance(section, dict) or not _text(section.get("title")):
             raise ValueError(f"У раздела «{key}» нет названия (title)")
-        for item in section.get("criteria") or []:
-            if not isinstance(item, dict) or not item.get("id") or not str(item.get("text", "")).strip():
+        if i and section.get("direction") not in (None, "", "in", "out"):
+            raise ValueError(f"Сценарий «{section['title']}»: направление (direction) — in, out или пусто")
+        items = section.get("criteria") or []
+        if not isinstance(items, list):
+            raise ValueError(f"В разделе «{section['title']}» пункты (criteria) должны быть списком")
+        for item in items:
+            if not isinstance(item, dict) or isinstance(item.get("id"), (dict, list)) or not _text(item.get("text")):
                 raise ValueError(f"В разделе «{section.get('title')}» есть пункт без кода (id) или текста (text)")
+            code = normalize_code(item.get("id"))
+            if not CODE_RE.fullmatch(code):
+                raise ValueError(f"Код пункта «{item.get('id')}»: буквы и номер, например G28 или IN05_1")
             if str(item.get("weight", "medium")) not in WEIGHT_KEYS:
-                raise ValueError(f"Пункт {item['id']}: значимость должна быть high, medium или low")
-            codes.append(str(item["id"]))
+                raise ValueError(f"Пункт {code}: значимость должна быть high, medium или low")
+            if not isinstance(item.get("evaluable", True), bool):
+                raise ValueError(f"Пункт {code}: evaluable должно быть true или false")
+            codes.append(code)
     duplicates = sorted({c for c in codes if codes.count(c) > 1})
     if duplicates:
         raise ValueError(f"Повторяющиеся коды пунктов: {', '.join(duplicates)}")
 
 
-def import_checklist_data(s, clinic, data: dict, replace_context: bool = True) -> None:
+def import_checklist_data(s, clinic, data: dict, replace_context: bool = False, foreign: bool | None = None) -> None:
     """Загружает чек-лист в клинику: разделы — по ключу, пункты — по коду.
 
     Существующие пункты с тем же кодом обновляются (история оценок по ним сохраняется),
     пункты и разделы, которых нет в данных, отключаются.
+
+    foreign — чек-лист другой клиники (копирование или выгруженный там файл). Коды и ключи у клиник
+    независимы, поэтому совпавший код с другим текстом — это другой пункт: он получает новый код,
+    а старый пункт отключается, и история оценок двух разных пунктов не смешивается.
     """
     from sqlalchemy import select
 
     from . import db
 
     validate_checklist_data(data)
+    if foreign is None:
+        foreign = data.get("source_clinic") not in (None, clinic.id)
     weights = data.get("weights") or {}
     if weights:
         clinic.weights_json = json.dumps(
@@ -170,37 +215,54 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = True) -
     criteria = {c.code: c for c in s.scalars(select(db.CriterionDef).where(db.CriterionDef.clinic_id == clinic.id))}
     seen_scenarios, seen_codes = set(), set()
 
+    def same(a: str, b: str) -> bool:
+        return _text(a).casefold() == _text(b).casefold()
+
     sections = [(GENERAL_KEY, data["general"])] + list((data.get("scenarios") or {}).items())
     for pos, (key, section) in enumerate(sections):
         items = section.get("criteria") or []
+        title = _text(section.get("title")) or key
         sc = scenarios.get(key)
+        if sc is not None and foreign and key != GENERAL_KEY and (key in seen_scenarios or not same(sc.title, title)):
+            key = _free_key(scenarios, f"{key}_{clinic.id}")
+            sc = None
         if sc is None:
             sc = db.Scenario(clinic_id=clinic.id, key=key)
             s.add(sc)
             scenarios[key] = sc
-        sc.title = str(section.get("title", key))
-        sc.description = " ".join(str(section.get("description", "")).split())
-        sc.direction = "" if key == GENERAL_KEY else str(section.get("direction", "") or "")
-        sc.prefix = sc.prefix or (_code_prefix(str(items[0]["id"])) if items else "") or ("G" if key == GENERAL_KEY else "S")
+        sc.title = title
+        sc.description = _text(section.get("description"))
+        sc.direction = "" if key == GENERAL_KEY else str(section.get("direction") or "")
+        if not sc.prefix:
+            used = {x.prefix for x in scenarios.values() if x is not sc}
+            prefix = (_code_prefix(normalize_code(items[0]["id"])) if items else "") or ("G" if key == GENERAL_KEY else "S")
+            sc.prefix = prefix if prefix not in used or key == GENERAL_KEY else next(
+                (f"S{chr(c)}" for c in range(ord("A"), ord("Z") + 1) if f"S{chr(c)}" not in used), prefix
+            )
         sc.position = pos
         sc.active = True
         s.flush()
         seen_scenarios.add(key)
         for cpos, item in enumerate(items):
-            code = str(item["id"])
+            code = normalize_code(item["id"])
+            text = _text(item["text"])
             c = criteria.get(code)
+            if c is not None and (code in seen_codes or (foreign and not same(c.text, text))):
+                code = next_criterion_code(s, clinic.id, _code_prefix(code) or sc.prefix)
+                c = None
             if c is None:
-                c = db.CriterionDef(clinic_id=clinic.id, code=code, text="")
+                c = db.CriterionDef(clinic_id=clinic.id, code=code, text=text)
                 s.add(c)
                 criteria[code] = c
             c.scenario_id = sc.id
-            c.num = str(item.get("num", ""))
-            c.text = " ".join(str(item["text"]).split())
+            c.num = _text(item.get("num"))
+            c.text = text
             c.weight_key = str(item.get("weight", "medium"))
-            c.evaluable = bool(item.get("evaluable", True))
-            c.hint = " ".join(str(item.get("hint", "")).split())
+            c.evaluable = item.get("evaluable", True) is not False
+            c.hint = _text(item.get("hint"))
             c.position = cpos
             c.active = True
+            s.flush()
             seen_codes.add(code)
 
     for key, sc in scenarios.items():
@@ -210,6 +272,14 @@ def import_checklist_data(s, clinic, data: dict, replace_context: bool = True) -
         if code not in seen_codes:
             c.active = False
     s.flush()
+
+
+def _free_key(scenarios: dict, base: str) -> str:
+    key, n = base[:50], 2
+    while key in scenarios:
+        key = f"{base[:46]}_{n}"
+        n += 1
+    return key
 
 
 def export_checklist_data(s, clinic) -> dict:
@@ -241,9 +311,9 @@ def export_checklist_data(s, clinic) -> dict:
     ).all()
     general = next((sc for sc in scenarios if sc.key == GENERAL_KEY), None)
     data = {
+        "source_clinic": clinic.id,  # по нему загрузка поймёт, что файл из другой клиники
         "weights": clinic.weights,
         "weight_labels": dict(WEIGHT_LABELS),
-        "clinic_context": clinic.ai_context or "",
         "general": {"title": general.title if general else "Общие правила", "criteria": criteria_of(general) if general else []},
         "scenarios": {},
     }
@@ -275,7 +345,8 @@ def seed_clinic_checklist(s, clinic, template_path: Path) -> None:
 
 
 def copy_checklist(s, source_clinic, target_clinic) -> None:
-    import_checklist_data(s, target_clinic, export_checklist_data(s, source_clinic))
+    """Чек-лист другой клиники; сведения о клинике для ИИ у каждой свои и не копируются."""
+    import_checklist_data(s, target_clinic, export_checklist_data(s, source_clinic), foreign=True)
 
 
 def next_criterion_code(s, clinic_id: int, prefix: str) -> str:
