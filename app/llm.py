@@ -45,7 +45,8 @@ class LLMClient(Protocol):
 class OpenRouterClient:
     def __init__(self, settings: Settings, http: httpx.Client | None = None):
         self.settings = settings
-        self.http = http or httpx.Client(timeout=settings.llm_timeout_sec)
+        # ждём долго только сам ответ (модель пишет его минутами); подключение не должно висеть столько же
+        self.http = http or httpx.Client(timeout=httpx.Timeout(settings.llm_timeout_sec, connect=30))
 
     def _body(self, system_parts: list[str], user: str, max_tokens: int | None, model: str | None = None) -> dict:
         system_content = [{"type": "text", "text": part} for part in system_parts]

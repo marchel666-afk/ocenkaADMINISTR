@@ -181,3 +181,9 @@ def test_failed_retry_keeps_cost_of_cut_off_attempt(settings):
     with pytest.raises(LLMError, match="не ответил") as e:
         make_client(settings, handler).complete(["a"], "b", max_tokens=2000)
     assert e.value.spent.completion_tokens == 2000 and e.value.spent.cost_usd == pytest.approx(0.001)
+
+
+def test_connect_timeout_is_short(settings):
+    """Долго ждём только ответ модели: подвисшее подключение с повторами держало бы очередь десятки минут."""
+    timeout = OpenRouterClient(settings).http.timeout
+    assert timeout.read == settings.llm_timeout_sec and timeout.connect == 30
