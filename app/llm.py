@@ -15,10 +15,15 @@ log = logging.getLogger(__name__)
 
 _RETRY_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504, 520, 522, 524, 529}
 _RETRY_DELAYS = (3, 10, 30)
+# Модели Claude «размышляют» перед ответом, и размышления расходуют тот же лимит длины ответа.
+# Не уложилась — запрос повторяется с вдвое большим лимитом, но не больше этого потолка.
+MAX_TOKENS_CAP = 64000
 
 
 class LLMError(RuntimeError):
-    pass
+    def __init__(self, message: str, spent: "LLMResponse | None" = None):
+        super().__init__(message)
+        self.spent = spent  # расход попыток, которые не дали ответа: он уже оплачен
 
 
 @dataclass
@@ -28,6 +33,7 @@ class LLMResponse:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     cost_usd: float = 0.0
+    truncated: bool = False  # ответ оборвался на лимите длины
 
 
 class LLMClient(Protocol):
@@ -71,12 +77,42 @@ class OpenRouterClient:
             "Content-Type": "application/json",
             "X-Title": "Call quality control",
         }
-        body = self._body(system_parts, user, max_tokens, model)
+        limit = max_tokens or self.settings.llm_max_tokens
+        spent = LLMResponse(text="")  # расход оборвавшихся попыток тоже оплачен
+        while True:
+            try:
+                result = self._send(url, headers, self._body(system_parts, user, limit, model))
+            except LLMError as e:
+                if e.spent is None:
+                    e.spent = spent
+                raise
+            spent.prompt_tokens += result.prompt_tokens
+            spent.completion_tokens += result.completion_tokens
+            spent.cost_usd += result.cost_usd
+            if not result.truncated:
+                result.prompt_tokens, result.completion_tokens = spent.prompt_tokens, spent.completion_tokens
+                result.cost_usd = spent.cost_usd
+                return result
+            if limit >= MAX_TOKENS_CAP:
+                raise LLMError(
+                    f"Ответ модели обрезан: не уместился даже в {limit} токенов. Нажмите «Переоценить»; "
+                    "если повторяется — сообщите разработчику",
+                    spent=spent,
+                )
+            log.warning("Ответ модели не уместился в %s токенов — повтор с большим лимитом", limit)
+            limit = min(limit * 2, MAX_TOKENS_CAP)
 
+    def _send(self, url: str, headers: dict, body: dict) -> LLMResponse:
         last_error = ""
         for attempt in range(len(_RETRY_DELAYS) + 1):
             try:
                 resp = self.http.post(url, json=body, headers=headers)
+            except httpx.ReadTimeout:
+                # модель долго пишет длинный ответ: повтор того же запроса снова занял бы очередь на столько же
+                raise LLMError(
+                    f"ИИ не ответил за {self.settings.llm_timeout_sec} с. Нажмите «Переоценить»; если повторяется — "
+                    "увеличьте LLM_TIMEOUT_SEC в файле .env"
+                ) from None
             except httpx.TransportError as e:
                 last_error = f"сетевая ошибка: {e}"
             else:
@@ -102,8 +138,6 @@ class OpenRouterClient:
         content = message.get("content") or ""
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        if choices[0].get("finish_reason") == "length":
-            raise LLMError("Ответ модели обрезан по лимиту длины (увеличьте LLM_MAX_TOKENS)")
         usage = data.get("usage") or {}
         return LLMResponse(
             text=content,
@@ -111,6 +145,7 @@ class OpenRouterClient:
             prompt_tokens=int(usage.get("prompt_tokens") or 0),
             completion_tokens=int(usage.get("completion_tokens") or 0),
             cost_usd=float(usage.get("cost") or 0.0),
+            truncated=choices[0].get("finish_reason") == "length",
         )
 
 

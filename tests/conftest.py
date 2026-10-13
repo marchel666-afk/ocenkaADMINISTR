@@ -63,10 +63,12 @@ class FakeLLM:
         self.raw = list(raw or [])  # заранее заданные ответы (строки) — отдаются первыми
         self.requests: list[tuple[list[str], str]] = []
         self.models: list[str | None] = []
+        self.max_tokens: list[int | None] = []
 
     def complete(self, system_parts, user, max_tokens=None, model=None):
         self.requests.append((system_parts, user))
         self.models.append(model)
+        self.max_tokens.append(max_tokens)
         if self.raw:
             return LLMResponse(text=self.raw.pop(0), model="fake", prompt_tokens=10, completion_tokens=5)
         system = "\n".join(system_parts)

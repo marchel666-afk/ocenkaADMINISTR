@@ -41,9 +41,9 @@ class Settings:
     llm_classify_model: str = "anthropic/claude-haiku-5.5"  # определение типа звонка
     llm_precise_model: str = "anthropic/claude-sonnet-5.5"  # кнопка «Переоценить точной моделью»
     llm_reasoning_effort: str = ""  # пусто — не передавать; иначе low / medium / high
-    llm_max_tokens: int = 12000
+    llm_max_tokens: int = 32000  # включая «размышления» модели; не уложится — лимит удвоится (до 64000)
     llm_prompt_cache: bool = True
-    llm_timeout_sec: int = 240
+    llm_timeout_sec: int = 600
 
     # Расшифровка (sherpa-onnx: GigaAM v2 + Silero VAD + TitaNet)
     asr_threads: int = 0  # 0 — автоматически (до 4 ядер)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -19,6 +20,8 @@ from .scoring import weighted_score
 from .transcription import Transcriber, Transcript, apply_admin_speaker
 
 log = logging.getLogger(__name__)
+
+ORPHAN_MESSAGE = "Обработка прервалась, и её итог не записался. Нажмите «Переоценить»"
 
 
 def match_employee(session: Session, clinic_id: int, name: str | None) -> db.Employee | None:
@@ -115,8 +118,10 @@ class Processor:
 
     def process(self, call_id: int) -> None:
         run = _Run()
+        started = time.monotonic()
         try:
             self._process(call_id, run)
+            log.info("Звонок %s обработан за %.0f с", call_id, time.monotonic() - started)
         except Superseded:
             log.info("Звонок %s изменили во время обработки — результат отброшен", call_id)
             self._safe(self._add_usage, call_id, run)
@@ -154,7 +159,13 @@ class Processor:
 
         # 2. расшифровка (минуты) — без транзакции
         if need_transcript:
+            log.info("Звонок %s: расшифровка записи %s", call_id, audio_path.name)
+            started = time.monotonic()
             transcript = self.transcriber.transcribe(audio_path)
+            log.info(
+                "Звонок %s: расшифровка готова за %.0f с (запись %.0f с)",
+                call_id, time.monotonic() - started, transcript.duration,
+            )
             with self.session_factory() as s:
                 # расшифровку сохраняем, даже если за это время звонок вернули в очередь (сменили тип,
                 # нажали «Переоценить»): запись та же, второй раз расшифровывать её незачем
@@ -341,11 +352,31 @@ class Worker(threading.Thread):
             self._last_clinic = row.clinic_id
             return row.id
 
+    def _fail_orphans(self) -> None:
+        """Звонки «в обработке», которые никто не обрабатывает, — показывает ошибкой.
+
+        Вызывается, когда очередь пуста: обработчик один и сейчас свободен, значит, такой звонок брошен —
+        например, не удалось записать итог его обработки. Иначе он висел бы «в расшифровке» до перезапуска.
+        """
+        with self.processor.session_factory() as s:
+            ids = s.scalars(select(db.Call.id).where(db.Call.status.in_(db.IN_PROGRESS))).all()
+            if not ids:
+                return
+            s.execute(
+                update(db.Call)
+                .where(db.Call.id.in_(ids), db.Call.status.in_(db.IN_PROGRESS))
+                .values(status=db.ERROR, status_message=ORPHAN_MESSAGE)
+            )
+            s.commit()
+        log.warning("Звонки %s числились в обработке, но не обрабатывались — отмечены ошибкой", ids)
+
     def run(self) -> None:
         while not self._stop_event.is_set():
             call_id = None
             try:
                 call_id = self._next_call_id()
+                if call_id is None:
+                    self._fail_orphans()
             except Exception:
                 log.exception("Ошибка чтения очереди")
             if call_id is None:

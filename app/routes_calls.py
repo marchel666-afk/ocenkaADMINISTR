@@ -8,7 +8,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 
@@ -144,6 +144,9 @@ def register(app: FastAPI, svc: Services) -> None:
                     db.Call.clinic_id == ctx.clinic_id, db.Call.status.in_((db.QUEUED, *db.IN_PROGRESS))
                 )
             )
+            errors = s.scalar(
+                select(func.count()).where(db.Call.clinic_id == ctx.clinic_id, db.Call.status == db.ERROR)
+            )
             return svc.render(
                 request,
                 "calls.html",
@@ -159,7 +162,23 @@ def register(app: FastAPI, svc: Services) -> None:
                 pages=max(1, -(-total // per_page)),
                 total=total,
                 pending=pending,
+                errors=errors,
             )
+
+    @app.post("/calls/retry-errors")
+    def calls_retry_errors(request: Request):
+        """Все звонки клиники с ошибкой — снова в очередь (например, после сбоя связи с ИИ)."""
+        ctx = ctx_of(request)
+        with sf() as s:
+            count = s.execute(
+                update(db.Call)
+                .where(db.Call.clinic_id == ctx.clinic_id, db.Call.status == db.ERROR)
+                .values(status=db.QUEUED, status_message=""),
+                execution_options={"synchronize_session": False},
+            ).rowcount
+            s.commit()
+        svc.wake_worker()
+        return redirect("/calls", msg=f"Звонков возвращено в очередь: {count}")
 
     @app.post("/calls/upload")
     def upload(

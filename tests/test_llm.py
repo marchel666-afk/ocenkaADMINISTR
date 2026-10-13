@@ -99,3 +99,85 @@ def test_model_override(settings):
 
     make_client(settings, handler).complete(["a"], "b", model="anthropic/claude-sonnet-5.5")
     assert seen["body"]["model"] == "anthropic/claude-sonnet-5.5"
+
+
+def test_truncated_answer_retried_with_bigger_limit(settings):
+    """Модель «размышляет» перед ответом, и размышления расходуют лимит длины: обрезанный ответ не ошибка,
+    а повод повторить запрос с вдвое большим лимитом. Обе попытки оплачены — расход суммируется."""
+    limits = []
+
+    def handler(request):
+        limits.append(json.loads(request.content)["max_tokens"])
+        if len(limits) == 1:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": '{"call_type"'}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 2000, "cost": 0.001},
+                },
+            )
+        return ok_response('{"call_type": "incoming"}')
+
+    resp = make_client(settings, handler).complete(["a"], "b", max_tokens=2000)
+    assert limits == [2000, 4000]
+    assert resp.text == '{"call_type": "incoming"}'
+    assert resp.prompt_tokens == 2200 and resp.completion_tokens == 2300
+    assert resp.cost_usd == pytest.approx(0.00127)
+
+
+def test_truncated_answer_gives_up_at_cap(settings):
+    limits = []
+
+    def handler(request):
+        limits.append(json.loads(request.content)["max_tokens"])
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "{"}, "finish_reason": "length"}],
+                "usage": {"prompt_tokens": 1000, "completion_tokens": 3000, "cost": 0.002},
+            },
+        )
+
+    with pytest.raises(LLMError, match="обрезан") as e:
+        make_client(settings, handler).complete(["a"], "b")
+    assert limits == [settings.llm_max_tokens, llm_module.MAX_TOKENS_CAP]
+    assert "LLM_MAX_TOKENS" not in str(e.value)  # совет «увеличьте лимит» не помогал — лимит растёт сам
+    spent = e.value.spent  # оплаченный расход неудачных попыток не теряется
+    assert spent.prompt_tokens == 2000 and spent.completion_tokens == 6000
+    assert spent.cost_usd == pytest.approx(0.004)
+
+
+def test_default_limits_leave_room_for_thinking(settings):
+    assert settings.llm_max_tokens >= 32000 and settings.llm_timeout_sec >= 600
+
+
+def test_read_timeout_not_retried(settings):
+    """Модель не уложилась во время ожидания: тот же запрос снова занял бы очередь на столько же."""
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(LLMError, match="не ответил"):
+        make_client(settings, handler).complete(["a"], "b")
+    assert len(calls) == 1
+
+
+def test_failed_retry_keeps_cost_of_cut_off_attempt(settings):
+    """Ответ оборвался, а повтор с большим лимитом не дождался ответа: оплаченная первая попытка не теряется."""
+
+    def handler(request):
+        if json.loads(request.content)["max_tokens"] == 2000:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "{"}, "finish_reason": "length"}],
+                    "usage": {"prompt_tokens": 1000, "completion_tokens": 2000, "cost": 0.001},
+                },
+            )
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    with pytest.raises(LLMError, match="не ответил") as e:
+        make_client(settings, handler).complete(["a"], "b", max_tokens=2000)
+    assert e.value.spent.completion_tokens == 2000 and e.value.spent.cost_usd == pytest.approx(0.001)

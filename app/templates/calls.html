@@ -63,6 +63,12 @@
     </form>
   </div>
   {% if pending %}<p class="muted small">В обработке: {{ pending }}. Страница обновляется автоматически.</p>{% endif %}
+  {% if errors %}
+  <form class="alert alert-error" method="post" action="/calls/retry-errors">
+    Звонков с ошибкой: {{ errors }}. Причина — в карточке звонка.
+    <button class="btn" type="submit">Повторить звонки с ошибкой</button>
+  </form>
+  {% endif %}
   {% if calls %}
   <table class="table">
     <thead><tr><th>Дата</th><th>Администратор</th><th>Тип звонка</th><th>Длит.</th><th>Оценка</th><th>Статус</th></tr></thead>
@@ -74,7 +80,7 @@
         <td>{{ type_title(c) if c.call_type else '—' }}</td>
         <td>{{ c.duration_sec|duration }}</td>
         <td><span class="score {{ c.score_total|score_class }}">{{ c.score_total|score }}</span></td>
-        <td><span class="status status-{{ c.status }}">{{ STATUS_LABELS[c.status] }}</span></td>
+        <td><span class="status status-{{ c.status }}"{% if c.status_message %} title="{{ c.status_message }}"{% endif %}>{{ STATUS_LABELS[c.status] }}</span></td>
       </tr>
     {% endfor %}
     </tbody>

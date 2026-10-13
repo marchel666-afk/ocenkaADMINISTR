@@ -16,6 +16,9 @@ from .transcription import SPEAKER_1, SPEAKER_2, Transcript
 log = logging.getLogger(__name__)
 
 DIRECTION_LABELS = {"in": "входящий", "out": "исходящий"}
+# Лимит ответа при определении типа звонка: сам ответ короткий, но модель перед ним «размышляет»,
+# и на длинном разговоре размышления занимают тысячи токенов (не уложится — лимит удвоится, см. llm.py).
+CLASSIFY_MAX_TOKENS = 8000
 
 
 # ---------------------------------------------------------------- данные результата
@@ -237,7 +240,12 @@ class Evaluator:
         """Запрос к модели с одной повторной попыткой, если ответ не разобрался как JSON."""
         last_error = ""
         for _ in range(2):
-            response = self.llm.complete(system_parts, user, max_tokens=max_tokens, model=model)
+            try:
+                response = self.llm.complete(system_parts, user, max_tokens=max_tokens, model=model)
+            except LLMError as e:
+                if e.spent is not None:
+                    usage.add(e.spent)
+                raise
             usage.add(response)
             try:
                 return extract_json(response.text)
@@ -267,7 +275,7 @@ class Evaluator:
             clinic_context=self.checklists.clinic_context, types=types, not_target=NOT_TARGET
         )
         user = f"Данные звонка:\n{_call_facts(transcript, direction, started_at)}\n\nРасшифровка:\n{transcript.to_text()}"
-        data = self._ask_json([system], user, usage, max_tokens=2000, model=self.classify_model)
+        data = self._ask_json([system], user, usage, max_tokens=CLASSIFY_MAX_TOKENS, model=self.classify_model)
 
         call_type = str(data.get("call_type", "")).strip()
         if strict and call_type not in allowed and call_type != NOT_TARGET:
